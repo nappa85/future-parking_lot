@@ -142,11 +142,11 @@ where
 /// Trait to permit FutureUpgradableRead implementation on wrapped RwLock (not RwLock itself)
 pub trait FutureUpgradableReadable<R: AsRef<RwLock<T>>, T, I: IntoFuture> {
     /// Takes a closure that will be executed when the Futures gains the upgradable-read-lock
-    fn future_read<F: FnOnce(RwLockUpgradableReadGuard<'_, T>) -> I>(&self, func: F) -> FutureUpgradableRead<R, T, F, I>;
+    fn future_upgradable_read<F: FnOnce(RwLockUpgradableReadGuard<'_, T>) -> I>(&self, func: F) -> FutureUpgradableRead<R, T, F, I>;
 }
 
 impl<R: AsRef<RwLock<T>>, T, I: IntoFuture> FutureUpgradableReadable<R, T, I> for R {
-    fn future_read<F: FnOnce(RwLockUpgradableReadGuard<'_, T>) -> I>(&self, func: F) -> FutureUpgradableRead<R, T, F, I> {
+    fn future_upgradable_read<F: FnOnce(RwLockUpgradableReadGuard<'_, T>) -> I>(&self, func: F) -> FutureUpgradableRead<R, T, F, I> {
         FutureUpgradableRead::new(self, func)
     }
 }
