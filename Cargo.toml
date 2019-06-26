@@ -1,5 +1,5 @@
 [package]
-name = "future-rwlock"
+name = "future-parking_lot"
 version = "0.1.0"
 authors = ["Marco Napetti <marco.napetti@gmail.com>"]
 edition = "2018"
