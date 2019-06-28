@@ -1,43 +1,54 @@
+// Copyright 2018 Marco Napetti
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
 use std::convert::AsRef;
 use std::marker::PhantomData;
 
 use tokio::prelude::{Async, future::{Future, IntoFuture}, task};
 
-use parking_lot::{Mutex, MutexGuard};
+use lock_api::{Mutex, RawMutex, MutexGuard};
 
 /// Wrapper to use Mutex in Future-style
-pub struct FutureLock<'a, R, T, F, I>
+pub struct FutureLock<'a, L, R, T, F, I>
 where
-    R: AsRef<Mutex<T>>,
-    F: FnOnce(MutexGuard<'_, T>) -> I,
+    L: AsRef<Mutex<R, T>>,
+    R: RawMutex,
+    F: FnOnce(MutexGuard<'_, R, T>) -> I,
     I: IntoFuture,
 {
-    lock: &'a R,
+    lock: &'a L,
     inner: Option<F>,
     _contents: PhantomData<T>,
+    _locktype: PhantomData<R>,
     future: Option<I::Future>,
 }
 
-impl<'a, R, T, F, I> FutureLock<'a, R, T, F, I>
+impl<'a, L, R, T, F, I> FutureLock<'a, L, R, T, F, I>
 where
-    R: AsRef<Mutex<T>>,
-    F: FnOnce(MutexGuard<'_, T>) -> I,
+    L: AsRef<Mutex<R, T>>,
+    R: RawMutex,
+    F: FnOnce(MutexGuard<'_, R, T>) -> I,
     I: IntoFuture,
 {
-    fn new(lock: &'a R, f: F) -> Self {
+    fn new(lock: &'a L, f: F) -> Self {
         FutureLock {
             lock,
             inner: Some(f),
             _contents: PhantomData,
+            _locktype: PhantomData,
             future: None,
         }
     }
 }
 
-impl<'a, R, T, F, I> Future for FutureLock<'a, R, T, F, I>
+impl<'a, L, R, T, F, I> Future for FutureLock<'a, L, R, T, F, I>
 where
-    R: AsRef<Mutex<T>>,
-    F: FnOnce(MutexGuard<'_, T>) -> I,
+    L: AsRef<Mutex<R, T>>,
+    R: RawMutex,
+    F: FnOnce(MutexGuard<'_, R, T>) -> I,
     I: IntoFuture,
 {
     type Item = <<I as IntoFuture>::Future as Future>::Item;
@@ -67,13 +78,13 @@ where
 }
 
 /// Trait to permit FutureLock implementation on wrapped Mutex (not Mutex itself)
-pub trait FutureLockable<R: AsRef<Mutex<T>>, T, I: IntoFuture> {
+pub trait FutureLockable<L: AsRef<Mutex<R, T>>, R: RawMutex, T, I: IntoFuture> {
     /// Takes a closure that will be executed when the Futures gains the read-lock
-    fn future_lock<F: FnOnce(MutexGuard<'_, T>) -> I>(&self, func: F) -> FutureLock<R, T, F, I>;
+    fn future_lock<F: FnOnce(MutexGuard<'_, R, T>) -> I>(&self, func: F) -> FutureLock<L, R, T, F, I>;
 }
 
-impl<R: AsRef<Mutex<T>>, T, I: IntoFuture> FutureLockable<R, T, I> for R {
-    fn future_lock<F: FnOnce(MutexGuard<'_, T>) -> I>(&self, func: F) -> FutureLock<R, T, F, I> {
+impl<L: AsRef<Mutex<R, T>>, R: RawMutex, T, I: IntoFuture> FutureLockable<L, R, T, I> for L {
+    fn future_lock<F: FnOnce(MutexGuard<'_, R, T>) -> I>(&self, func: F) -> FutureLock<L, R, T, F, I> {
         FutureLock::new(self, func)
     }
 }
