@@ -3,6 +3,12 @@ name = "future-parking_lot"
 version = "0.1.0"
 authors = ["Marco Napetti <marco.napetti@gmail.com>"]
 edition = "2018"
+description = "An \"as simple as possible\" Future implementation for parking_lot"
+license = "Apache-2.0/MIT"
+repository = "https://github.com/nappa85/future-parking_lot"
+readme = "README.md"
+keywords = ["mutex", "rwlock", "future", "futures", "async"]
+categories = ["concurrency", "asynchronous"]
 
 [dependencies]
 tokio = "0.1"
