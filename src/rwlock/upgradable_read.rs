@@ -4,87 +4,68 @@
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
-use std::convert::AsRef;
-use std::marker::PhantomData;
 
-use tokio::prelude::{Async, future::{Future, IntoFuture}, task};
+use std::marker::PhantomData;
+use std::future::Future;
+use std::task::{Poll, Context};
+use std::pin::Pin;
+
+// use future_utils::*;
 
 use lock_api::{RwLock, RawRwLockUpgrade, RwLockUpgradableReadGuard};
 
 /// Wrapper to upgradable-read from RwLock in Future-style
-pub struct FutureUpgradableRead<'a, L, R, T, F, I>
+pub struct FutureUpgradableRead<'a, R, T>
 where
-    L: AsRef<RwLock<R, T>>,
-    R: RawRwLockUpgrade,
-    F: FnOnce(RwLockUpgradableReadGuard<'_, R, T>) -> I,
-    I: IntoFuture,
+    R: RawRwLockUpgrade + 'a,
+    T: 'a,
 {
-    lock: &'a L,
-    inner: Option<F>,
+    lock: &'a RwLock<R, T>,
     _contents: PhantomData<T>,
     _locktype: PhantomData<R>,
-    future: Option<I::Future>,
 }
 
-impl<'a, L, R, T, F, I> FutureUpgradableRead<'a, L, R, T, F, I>
+impl<'a, R, T> FutureUpgradableRead<'a, R, T>
 where
-    L: AsRef<RwLock<R, T>>,
-    R: RawRwLockUpgrade,
-    F: FnOnce(RwLockUpgradableReadGuard<'_, R, T>) -> I,
-    I: IntoFuture,
+    R: RawRwLockUpgrade + 'a,
+    T: 'a,
 {
-    fn new(lock: &'a L, f: F) -> Self {
+    fn new(lock: &'a RwLock<R, T>) -> Self {
         FutureUpgradableRead {
             lock,
-            inner: Some(f),
             _contents: PhantomData,
             _locktype: PhantomData,
-            future: None,
         }
     }
 }
 
-impl<'a, L, R, T, F, I> Future for FutureUpgradableRead<'a, L, R, T, F, I>
+impl<'a, R, T> Future for FutureUpgradableRead<'a, R, T>
 where
-    L: AsRef<RwLock<R, T>>,
-    R: RawRwLockUpgrade,
-    F: FnOnce(RwLockUpgradableReadGuard<'_, R, T>) -> I,
-    I: IntoFuture,
+    R: RawRwLockUpgrade + 'a,
+    T: 'a,
 {
-    type Item = <<I as IntoFuture>::Future as Future>::Item;
-    type Error = <<I as IntoFuture>::Future as Future>::Error;
+    type Output = RwLockUpgradableReadGuard<'a, R, T>;
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        if let Some(ref mut future) = self.future {
-            // Use cached future
-            return future.poll();
-        }
-
-        match self.lock.as_ref().try_upgradable_read() {
-            Some(upgradable_lock) => {
-                // Cache resulting future to avoid executing the inner function again
-                let mut future = (self.inner.take().expect("Can't poll on FutureUpgradableRead more than once"))(upgradable_lock).into_future();
-                let res = future.poll();
-                self.future = Some(future);
-                res
-            },
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match self.lock.try_upgradable_read() {
+            Some(upgradable_lock) => Poll::Ready(upgradable_lock),
             None => {
                 // Notify current Task we can be polled again
-                task::current().notify();
-                Ok(Async::NotReady)
+                cx.waker().wake_by_ref();
+                Poll::Pending
             },
         }
     }
 }
 
 /// Trait to permit FutureUpgradableRead implementation on wrapped RwLock (not RwLock itself)
-pub trait FutureUpgradableReadable<L: AsRef<RwLock<R, T>>, R: RawRwLockUpgrade, T, I: IntoFuture> {
-    /// Takes a closure that will be executed when the Futures gains the upgradable-read-lock
-    fn future_upgradable_read<F: FnOnce(RwLockUpgradableReadGuard<'_, R, T>) -> I>(&self, func: F) -> FutureUpgradableRead<L, R, T, F, I>;
+pub trait FutureUpgradableReadable<R: RawRwLockUpgrade, T> {
+    /// Returns the upgradable-read-lock without blocking
+    fn future_upgradable_read(&self) -> FutureUpgradableRead<R, T>;
 }
 
-impl<L: AsRef<RwLock<R, T>>, R: RawRwLockUpgrade, T, I: IntoFuture> FutureUpgradableReadable<L, R, T, I> for L {
-    fn future_upgradable_read<F: FnOnce(RwLockUpgradableReadGuard<'_, R, T>) -> I>(&self, func: F) -> FutureUpgradableRead<L, R, T, F, I> {
-        FutureUpgradableRead::new(self, func)
+impl<R: RawRwLockUpgrade, T> FutureUpgradableReadable<R, T> for RwLock<R, T> {
+    fn future_upgradable_read(&self) -> FutureUpgradableRead<R, T> {
+        FutureUpgradableRead::new(self)
     }
 }

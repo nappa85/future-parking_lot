@@ -24,8 +24,8 @@ mod tests {
     use std::sync::Arc;
     use std::rc::Rc;
 
-    use tokio::runtime::current_thread;
-    use tokio::prelude::{Future, future::lazy};
+    use tokio::runtime::Runtime as ThreadpoolRuntime;
+    use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
 
     use parking_lot::RwLock;
 
@@ -41,121 +41,140 @@ mod tests {
 
     #[test]
     fn current_thread_lazy_static() {
-        current_thread::block_on_all(LOCK1.future_write(|mut v| -> Result<(), ()> {
-            v.push(String::from("It works!"));
-            Ok(())
-        })
-        .and_then(|_| LOCK1.future_read(|v| {
-                assert!(v.len() == 1 && v[0] == "It works!");
-                Ok(())
-        }))).unwrap();
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = LOCK1.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = LOCK1.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
     }
 
     #[test]
     fn current_thread_local_arc() {
         let lock = Arc::new(RwLock::new(Vec::new()));
-        current_thread::block_on_all(lock.future_write(|mut v| -> Result<(), ()> {
-            v.push(String::from("It works!"));
-            Ok(())
-        })
-        .and_then(|_| lock.future_read(|v| {
-                assert!(v.len() == 1 && v[0] == "It works!");
-                Ok(())
-        }))).unwrap();
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = lock.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = lock.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
     }
 
     #[test]
     fn current_thread_local_rc() {
         let lock = Rc::new(RwLock::new(Vec::new()));
-        current_thread::block_on_all(lock.future_write(|mut v| -> Result<(), ()> {
-            v.push(String::from("It works!"));
-            Ok(())
-        })
-        .and_then(|_| lock.future_read(|v| {
-                assert!(v.len() == 1 && v[0] == "It works!");
-                Ok(())
-        }))).unwrap();
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = lock.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = lock.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
     }
 
     #[test]
     fn current_thread_local_box() {
         let lock = Box::new(RwLock::new(Vec::new()));
-        current_thread::block_on_all(lock.future_write(|mut v| -> Result<(), ()> {
-            v.push(String::from("It works!"));
-            Ok(())
-        })
-        .and_then(|_| lock.future_read(|v| {
-                assert!(v.len() == 1 && v[0] == "It works!");
-                Ok(())
-        }))).unwrap();
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = lock.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = lock.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
     }
 
     #[test]
     fn multithread_lazy_static() {
-        tokio::run(LOCK2.future_write(|mut v| -> Result<(), ()> {
-            v.push(String::from("It works!"));
-            Ok(())
-        })
-        .and_then(|_| LOCK2.future_read(|v| {
-                assert!(v.len() == 1 && v[0] == "It works!");
-                Ok(())
-        })));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = LOCK2.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = LOCK2.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
     }
 
-    // Implies a lifetime problem
-    // #[test]
-    // fn multithread_local_arc() {
-    //     let lock = Arc::new(RwLock::new(Vec::new()));
-    //     tokio::run(lock.future_write(|mut v| {
-    //         &v.push(String::from("It works!"));
-    //         lock.future_read(|v| {
-    //             assert!(v.len() == 1 && v[0] == "It works!");
-    //             Ok(())
-    //         })
-    //     }));
-    // }
+    #[test]
+    fn multithread_local_arc() {
+        let lock = Arc::new(RwLock::new(Vec::new()));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = lock.future_write().await;
+                v.push(String::from("It works!"));
+            }
 
-    // Can't be done because Rc isn't Sync
-    // #[test]
-    // fn multithread_local_rc() {
-    //     let lock = Rc::new(RwLock::new(Vec::new()));
-    //     tokio::run(lock.future_write(|mut v| {
-    //         &v.push(String::from("It works!"));
-    //         lock.future_read(|v| {
-    //             assert!(v.len() == 1 && v[0] == "It works!");
-    //             Ok(())
-    //         })
-    //     }));
-    // }
+            let v = lock.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
+    }
 
-    // Implies a lifetime problem
-    // #[test]
-    // fn multithread_local_box() {
-    //     let lock = Box::new(RwLock::new(Vec::new()));
-    //     tokio::run(lock.future_write(|mut v| {
-    //         &v.push(String::from("It works!"));
-    //         lock.future_read(|v| {
-    //             assert!(v.len() == 1 && v[0] == "It works!");
-    //             Ok(())
-    //         })
-    //     }));
-    // }
+    #[test]
+    fn multithread_local_rc() {
+        let lock = Rc::new(RwLock::new(Vec::new()));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = lock.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = lock.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
+    }
+
+    #[test]
+    fn multithread_local_box() {
+        let lock = Box::new(RwLock::new(Vec::new()));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            {
+                let mut v = lock.future_write().await;
+                v.push(String::from("It works!"));
+            }
+
+            let v = lock.future_read().await;
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
+    }
 
     #[test]
     fn multithread_concurrent_lazy_static() {
-        tokio::run(lazy(|| {
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
             // spawn 10 concurrent futures
             for i in 0..100 {
-                tokio::spawn(CONCURRENT_LOCK.future_write(move |mut v| {
-                    v.push(format!("{}", i));
-                    CONCURRENT_LOCK.future_read(|v| {
-                        println!("{:?}", v);
-                        Ok(())
-                    })
-                }));
+                tokio::spawn(async move {
+                    {
+                        let mut v = CONCURRENT_LOCK.future_write().await;
+                        v.push(format!("{}", i));
+                    }
+
+                    let v = CONCURRENT_LOCK.future_read().await;
+                    println!("{:?}", v);
+                });
             }
-            Ok(())
-        }));
+        });
+        runtime.shutdown_on_idle();
         let singleton = CONCURRENT_LOCK.read();
         assert_eq!(singleton.len(), 100);
     }

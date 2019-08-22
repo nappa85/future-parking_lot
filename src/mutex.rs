@@ -4,98 +4,83 @@
 // http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
-use std::convert::AsRef;
-use std::marker::PhantomData;
 
-use tokio::prelude::{Async, future::{Future, IntoFuture}, task};
+use std::marker::PhantomData;
+use std::future::Future;
+use std::task::{Poll, Context};
+use std::pin::Pin;
 
 use lock_api::{Mutex, RawMutex, MutexGuard};
 
 /// Wrapper to use Mutex in Future-style
-pub struct FutureLock<'a, L, R, T, F, I>
+pub struct FutureLock<'a, R, T>
 where
-    L: AsRef<Mutex<R, T>>,
-    R: RawMutex,
-    F: FnOnce(MutexGuard<'_, R, T>) -> I,
-    I: IntoFuture,
+    R: RawMutex + 'a,
+    T: 'a,
 {
-    lock: &'a L,
-    inner: Option<F>,
+    lock: &'a Mutex<R, T>,
     _contents: PhantomData<T>,
     _locktype: PhantomData<R>,
-    future: Option<I::Future>,
 }
 
-impl<'a, L, R, T, F, I> FutureLock<'a, L, R, T, F, I>
+impl<'a, R, T> FutureLock<'a, R, T>
 where
-    L: AsRef<Mutex<R, T>>,
-    R: RawMutex,
-    F: FnOnce(MutexGuard<'_, R, T>) -> I,
-    I: IntoFuture,
+    R: RawMutex + 'a,
+    T: 'a,
 {
-    fn new(lock: &'a L, f: F) -> Self {
+    fn new(lock: &'a Mutex<R, T>) -> Self {
         FutureLock {
             lock,
-            inner: Some(f),
             _contents: PhantomData,
             _locktype: PhantomData,
-            future: None,
         }
     }
 }
 
-impl<'a, L, R, T, F, I> Future for FutureLock<'a, L, R, T, F, I>
+impl<'a, R, T> Future for FutureLock<'a, R, T>
 where
-    L: AsRef<Mutex<R, T>>,
-    R: RawMutex,
-    F: FnOnce(MutexGuard<'_, R, T>) -> I,
-    I: IntoFuture,
+    R: RawMutex + 'a,
+    T: 'a,
 {
-    type Item = <<I as IntoFuture>::Future as Future>::Item;
-    type Error = <<I as IntoFuture>::Future as Future>::Error;
+    type Output = MutexGuard<'a, R, T>;
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        if let Some(ref mut future) = self.future {
-            // Use cached future
-            return future.poll();
-        }
-
-        match self.lock.as_ref().try_lock() {
-            Some(read_lock) => {
-                // Cache resulting future to avoid executing the inner function again
-                let mut future = (self.inner.take().expect("Can't poll on FutureLock more than once"))(read_lock).into_future();
-                let res = future.poll();
-                self.future = Some(future);
-                res
-            },
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match self.lock.try_lock() {
+            Some(read_lock) => Poll::Ready(read_lock),
             None => {
                 // Notify current Task we can be polled again
-                task::current().notify();
-                Ok(Async::NotReady)
+                cx.waker().wake_by_ref();
+                Poll::Pending
             },
         }
     }
 }
 
 /// Trait to permit FutureLock implementation on wrapped Mutex (not Mutex itself)
-pub trait FutureLockable<L: AsRef<Mutex<R, T>>, R: RawMutex, T, I: IntoFuture> {
-    /// Takes a closure that will be executed when the Futures gains the read-lock
-    fn future_lock<F: FnOnce(MutexGuard<'_, R, T>) -> I>(&self, func: F) -> FutureLock<L, R, T, F, I>;
+pub trait FutureLockable<R: RawMutex, T> {
+    /// Returns the lock without blocking
+    fn future_lock(&self) -> FutureLock<R, T>;
 }
 
-impl<L: AsRef<Mutex<R, T>>, R: RawMutex, T, I: IntoFuture> FutureLockable<L, R, T, I> for L {
-    fn future_lock<F: FnOnce(MutexGuard<'_, R, T>) -> I>(&self, func: F) -> FutureLock<L, R, T, F, I> {
-        FutureLock::new(self, func)
+impl<R: RawMutex, T> FutureLockable<R, T> for Mutex<R, T> {
+    fn future_lock(&self) -> FutureLock<R, T> {
+        FutureLock::new(self)
     }
 }
+
+// impl<L: AsRef<Mutex<R, T>>, R: RawMutex, T> FutureLockable<R, T> for L {
+//     fn future_lock(&self) -> FutureLock<R, T> {
+//         FutureLock::new(self.as_ref())
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::rc::Rc;
 
-    use tokio::runtime::current_thread;
-    use tokio::prelude::future::lazy;
+    use tokio::runtime::Runtime as ThreadpoolRuntime;
+    use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
 
     use parking_lot::Mutex;
 
@@ -111,98 +96,104 @@ mod tests {
 
     #[test]
     fn current_thread_lazy_static() {
-        current_thread::block_on_all(LOCK1.future_lock(|mut v| -> Result<(), ()> {
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = LOCK1.future_lock().await;
             v.push(String::from("It works!"));
             assert!(v.len() == 1 && v[0] == "It works!");
-            Ok(())
-        })).unwrap();
+        });
     }
 
     #[test]
     fn current_thread_local_arc() {
         let lock = Arc::new(Mutex::new(Vec::new()));
-        current_thread::block_on_all(lock.future_lock(|mut v| -> Result<(), ()> {
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
             assert!(v.len() == 1 && v[0] == "It works!");
-            Ok(())
-        })).unwrap();
+        });
     }
 
     #[test]
     fn current_thread_local_rc() {
         let lock = Rc::new(Mutex::new(Vec::new()));
-        current_thread::block_on_all(lock.future_lock(|mut v| -> Result<(), ()> {
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
             assert!(v.len() == 1 && v[0] == "It works!");
-            Ok(())
-        })).unwrap();
+        });
     }
 
     #[test]
     fn current_thread_local_box() {
         let lock = Box::new(Mutex::new(Vec::new()));
-        current_thread::block_on_all(lock.future_lock(|mut v| -> Result<(), ()> {
+        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
             assert!(v.len() == 1 && v[0] == "It works!");
-            Ok(())
-        })).unwrap();
+        });
     }
 
     #[test]
     fn multithread_lazy_static() {
-        tokio::run(LOCK2.future_lock(|mut v| -> Result<(), ()> {
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = LOCK2.future_lock().await;
             v.push(String::from("It works!"));
             assert!(v.len() == 1 && v[0] == "It works!");
-            Ok(())
-        }));
+        });
     }
 
-    // Implies a lifetime problem
-    // #[test]
-    // fn multithread_local_arc() {
-    //     let lock = Arc::new(Mutex::new(Vec::new()));
-    //     tokio::run(lock.future_lock(|mut v| {
-    //         v.push(String::from("It works!"));
-    //         assert!(v.len() == 1 && v[0] == "It works!");
-    //         Ok(())
-    //     });
-    // }
+    #[test]
+    fn multithread_local_arc() {
+        let lock = Arc::new(Mutex::new(Vec::new()));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = lock.future_lock().await;
+            v.push(String::from("It works!"));
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
+    }
 
-    // Can't be done because Rc isn't Sync
-    // #[test]
-    // fn multithread_local_rc() {
-    //     let lock = Rc::new(Mutex::new(Vec::new()));
-    //     tokio::run(lock.future_lock(|mut v| {
-    //         v.push(String::from("It works!"));
-    //         assert!(v.len() == 1 && v[0] == "It works!");
-    //         Ok(())
-    //     });
-    // }
+    #[test]
+    fn multithread_local_rc() {
+        let lock = Rc::new(Mutex::new(Vec::new()));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = lock.future_lock().await;
+            v.push(String::from("It works!"));
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
+    }
 
-    // Implies a lifetime problem
-    // #[test]
-    // fn multithread_local_box() {
-    //     let lock = Box::new(Mutex::new(Vec::new()));
-    //     tokio::run(lock.future_lock(|mut v| {
-    //         v.push(String::from("It works!"));
-    //         assert!(v.len() == 1 && v[0] == "It works!");
-    //         Ok(())
-    //     });
-    // }
+    #[test]
+    fn multithread_local_box() {
+        let lock = Box::new(Mutex::new(Vec::new()));
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
+            let mut v = lock.future_lock().await;
+            v.push(String::from("It works!"));
+            assert!(v.len() == 1 && v[0] == "It works!");
+        });
+    }
 
     #[test]
     fn multithread_concurrent_lazy_static() {
-        tokio::run(lazy(|| {
+        let runtime = ThreadpoolRuntime::new().unwrap();
+        runtime.block_on(async {
             // spawn 10 concurrent futures
             for i in 0..100 {
-                tokio::spawn(CONCURRENT_LOCK.future_lock(move |mut v| {
+                tokio::spawn(async move {
+                    let mut v = CONCURRENT_LOCK.future_lock().await;
                     v.push(format!("{}", i));
                     println!("{:?}", v);
-                    Ok(())
-                }));
+                });
             }
-            Ok(())
-        }));
+        });
+        runtime.shutdown_on_idle();
         let singleton = CONCURRENT_LOCK.lock();
         assert_eq!(singleton.len(), 100);
     }
