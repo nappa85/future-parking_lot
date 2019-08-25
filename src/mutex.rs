@@ -7,10 +7,82 @@
 
 use std::marker::PhantomData;
 use std::future::Future;
-use std::task::{Poll, Context};
+use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
+use std::cell::UnsafeCell;
 
-use lock_api::{Mutex, RawMutex, MutexGuard};
+use lock_api::{Mutex as MutexLock, RawMutex, MutexGuard};
+
+use parking_lot::RawMutex as RawMutexLock;
+
+/// a Future-compatible parking_lot::Mutex
+pub type Mutex<T> = MutexLock<FutureRawMutex<RawMutexLock>, T>;
+
+/// RawMutex implementor that collects Wakers to wake them up when unlocked
+pub struct FutureRawMutex<R> where R: RawMutex {
+    wakers: UnsafeCell<Option<Vec<Waker>>>,
+    inner: R,
+}
+
+impl<R> FutureRawMutex<R> where R: RawMutex {
+    unsafe fn register_waker(&self, waker: &Waker) {
+        let temp = &mut *self.wakers.get();
+        if temp.is_none() {
+            *temp = Some(Vec::new());
+            eprintln!("waker list created");
+        }
+        else {
+            eprintln!("waker list already existing");
+        }
+        if let Some(ref mut v) = temp {
+            v.push(waker.clone());
+            eprintln!("waker registered");
+        }
+        else {
+            eprintln!("can't register waker");
+        }
+    }
+}
+
+unsafe impl<R> Sync for FutureRawMutex<R> where R: RawMutex {}
+
+unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
+    type GuardMarker = R::GuardMarker;
+
+    const INIT: FutureRawMutex<R> = {
+        FutureRawMutex {
+            wakers: UnsafeCell::new(None),
+            inner: R::INIT
+        }
+    };
+
+    fn lock(&self) {
+        self.inner.lock();
+    }
+
+    fn try_lock(&self) -> bool {
+        self.inner.try_lock()
+    }
+
+    fn unlock(&self) {
+        self.inner.unlock();
+
+        unsafe {
+            let temp = &mut *self.wakers.get();
+            if let Some(v) = temp {
+                // let mut waker = v.pop();
+                // while let Some(w) = waker {
+                //     w.wake();
+                //     eprintln!("Task waked up");
+                //     waker = v.pop();
+                // }
+                if let Some(w) = v.pop() {
+                    w.wake();
+                }
+            }
+        }
+    }
+}
 
 /// Wrapper to use Mutex in Future-style
 pub struct FutureLock<'a, R, T>
@@ -18,7 +90,7 @@ where
     R: RawMutex + 'a,
     T: 'a,
 {
-    lock: &'a Mutex<R, T>,
+    lock: &'a MutexLock<FutureRawMutex<R>, T>,
     _contents: PhantomData<T>,
     _locktype: PhantomData<R>,
 }
@@ -28,7 +100,7 @@ where
     R: RawMutex + 'a,
     T: 'a,
 {
-    fn new(lock: &'a Mutex<R, T>) -> Self {
+    fn new(lock: &'a MutexLock<FutureRawMutex<R>, T>) -> Self {
         FutureLock {
             lock,
             _contents: PhantomData,
@@ -42,14 +114,14 @@ where
     R: RawMutex + 'a,
     T: 'a,
 {
-    type Output = MutexGuard<'a, R, T>;
+    type Output = MutexGuard<'a, FutureRawMutex<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match self.lock.try_lock() {
             Some(read_lock) => Poll::Ready(read_lock),
             None => {
-                // Notify current Task we can be polled again
-                cx.waker().wake_by_ref();
+                // Register Waker so we can notified when we can be polled again
+                unsafe { self.lock.raw().register_waker(cx.waker()); }
                 Poll::Pending
             },
         }
@@ -62,7 +134,7 @@ pub trait FutureLockable<R: RawMutex, T> {
     fn future_lock(&self) -> FutureLock<R, T>;
 }
 
-impl<R: RawMutex, T> FutureLockable<R, T> for Mutex<R, T> {
+impl<R: RawMutex, T> FutureLockable<R, T> for MutexLock<FutureRawMutex<R>, T> {
     fn future_lock(&self) -> FutureLock<R, T> {
         FutureLock::new(self)
     }
@@ -82,7 +154,7 @@ mod tests {
     use tokio::runtime::Runtime as ThreadpoolRuntime;
     use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
 
-    use parking_lot::Mutex;
+    use super::Mutex;
 
     use super::{FutureLockable};
 
