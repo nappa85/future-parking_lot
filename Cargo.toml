@@ -13,6 +13,7 @@ categories = ["concurrency", "asynchronous"]
 [dependencies]
 lock_api = "0.3"
 parking_lot = "0.9"
+crossbeam = "0.7"
 
 [dev-dependencies]
 lazy_static = "1.3"

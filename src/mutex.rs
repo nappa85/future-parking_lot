@@ -10,9 +10,10 @@ use std::future::Future;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 // use std::cell::UnsafeCell;
-use std::sync::mpsc::{channel, Sender, Receiver};
+// use std::sync::mpsc::{channel, Sender, Receiver};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::ptr::null_mut;
+use crossbeam::queue::SegQueue;
 
 use lock_api::{Mutex as MutexLock, RawMutex, MutexGuard};
 
@@ -26,7 +27,8 @@ pub struct FutureRawMutex<R> where R: RawMutex {
     // wakers: UnsafeCell<Option<(Sender<Waker>, Receiver<Waker>)>>,
     // wakers: UnsafeCell<Option<Vec<Waker>>>,
     // wakers: AtomicPtr<Vec<Waker>>,
-    wakers: AtomicPtr<(Sender<Waker>, Receiver<Waker>)>,
+    // wakers: AtomicPtr<(Sender<Waker>, Receiver<Waker>)>,
+    wakers: AtomicPtr<SegQueue<Waker>>,
     inner: R,
 }
 
@@ -42,8 +44,8 @@ impl<R> FutureRawMutex<R> where R: RawMutex {
         //     // eprintln!("can't register waker");
         // }
         let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
-        // v.push(waker.clone());
-        v.0.send(waker.clone()).unwrap();
+        v.push(waker.clone());
+        // v.0.send(waker.clone()).unwrap();
     }
 }
 
@@ -73,7 +75,8 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
         {
             let v = self.wakers.load(Ordering::Acquire);
             if v.is_null() {
-                let temp = Box::new(channel());
+                // let temp = Box::new(channel());
+                let temp = Box::new(SegQueue::new());
                 self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
             }
         }
@@ -94,7 +97,8 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
         {
             let v = self.wakers.load(Ordering::Acquire);
             if v.is_null() {
-                let temp = Box::new(channel());
+                // let temp = Box::new(channel());
+                let temp = Box::new(SegQueue::new());
                 self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
             }
         }
@@ -118,14 +122,16 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
         // }
         {
             let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
-            // let mut waker = v.pop();
-            // while let Some(w) = waker {
-            //     w.wake();
-            //     waker = v.pop();
-            // }
-            for waker in v.1.try_iter() {
-                waker.wake();
+            let mut waker = v.pop();
+            while let Ok(w) = waker {
+                w.wake();
+                waker = v.pop();
             }
+            // let mut waker = v.1.try_recv();
+            // while let Ok(w) = waker {
+            //     w.wake();
+            //     waker = v.1.try_recv();
+            // }
         }
     }
 }
