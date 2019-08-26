@@ -59,6 +59,15 @@ impl<R> FutureRawRwLock<R> where R: RawRwLock {
     }
 }
 
+impl<R> Drop for FutureRawRwLock<R> where R: RawRwLock {
+    fn drop(&mut self) {
+        let v = self.wakers.load(Ordering::Relaxed);
+        if !v.is_null() {
+            unsafe { Box::from_raw(v) };
+        }
+    }
+}
+
 unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
     type GuardMarker = R::GuardMarker;
 

@@ -48,6 +48,15 @@ impl<R> FutureRawMutex<R> where R: RawMutex {
     }
 }
 
+impl<R> Drop for FutureRawMutex<R> where R: RawMutex {
+    fn drop(&mut self) {
+        let v = self.wakers.load(Ordering::Relaxed);
+        if !v.is_null() {
+            unsafe { Box::from_raw(v) };
+        }
+    }
+}
+
 unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
     type GuardMarker = R::GuardMarker;
 
