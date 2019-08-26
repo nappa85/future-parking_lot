@@ -10,7 +10,7 @@ use std::future::Future;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 // use std::cell::UnsafeCell;
-// use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::ptr::null_mut;
 
@@ -25,7 +25,8 @@ pub type Mutex<T> = MutexLock<FutureRawMutex<RawMutexLock>, T>;
 pub struct FutureRawMutex<R> where R: RawMutex {
     // wakers: UnsafeCell<Option<(Sender<Waker>, Receiver<Waker>)>>,
     // wakers: UnsafeCell<Option<Vec<Waker>>>,
-    wakers: AtomicPtr<Vec<Waker>>,
+    // wakers: AtomicPtr<Vec<Waker>>,
+    wakers: AtomicPtr<(Sender<Waker>, Receiver<Waker>)>,
     inner: R,
 }
 
@@ -34,14 +35,15 @@ impl<R> FutureRawMutex<R> where R: RawMutex {
         // let temp = unsafe { &mut *self.wakers.get() };
         // if let Some(ref mut v) = temp {
         //     v.0.send(waker.clone()).unwrap();
-        //     // v.push(waker.clone());
+        //     v.push(waker.clone());
         //     // eprintln!("waker registered");
         // }
         // else {
         //     // eprintln!("can't register waker");
         // }
-        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
-        v.push(waker.clone());
+        let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
+        // v.push(waker.clone());
+        v.0.send(waker.clone()).unwrap();
     }
 }
 
@@ -62,17 +64,17 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
         // let temp = unsafe { &mut *self.wakers.get() };
         // if temp.is_none() {
         //     *temp = Some(channel());
-        //     // *temp = Some(Vec::new());
+        //     *temp = Some(Vec::new());
         //     // eprintln!("waker list created");
         // }
         // else {
         //     // eprintln!("waker list already existing");
         // }
         {
-            let v = self.wakers.load(Ordering::Relaxed);
+            let v = self.wakers.load(Ordering::Acquire);
             if v.is_null() {
-                let temp = Box::new(Vec::new());
-                self.wakers.store(Box::into_raw(temp), Ordering::Relaxed);
+                let temp = Box::new(channel());
+                self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
             }
         }
 
@@ -83,17 +85,17 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
         // let temp = unsafe { &mut *self.wakers.get() };
         // if temp.is_none() {
         //     *temp = Some(channel());
-        //     // *temp = Some(Vec::new());
+        //     *temp = Some(Vec::new());
         //     // eprintln!("waker list created");
         // }
         // else {
         //     // eprintln!("waker list already existing");
         // }
         {
-            let v = self.wakers.load(Ordering::Relaxed);
+            let v = self.wakers.load(Ordering::Acquire);
             if v.is_null() {
-                let temp = Box::new(Vec::new());
-                self.wakers.store(Box::into_raw(temp), Ordering::Relaxed);
+                let temp = Box::new(channel());
+                self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
             }
         }
 
@@ -108,18 +110,21 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
         //     for waker in v.1.try_iter() {
         //         waker.wake();
         //     }
-        //     // let mut waker = v.pop();
-        //     // while let Some(w) = waker {
-        //     //     w.wake();
-        //     //     waker = v.pop();
-        //     // }
+        //     let mut waker = v.pop();
+        //     while let Some(w) = waker {
+        //         w.wake();
+        //         waker = v.pop();
+        //     }
         // }
         {
-            let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
-            let mut waker = v.pop();
-            while let Some(w) = waker {
-                w.wake();
-                waker = v.pop();
+            let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
+            // let mut waker = v.pop();
+            // while let Some(w) = waker {
+            //     w.wake();
+            //     waker = v.pop();
+            // }
+            for waker in v.1.try_iter() {
+                waker.wake();
             }
         }
     }
@@ -301,8 +306,8 @@ mod tests {
             for i in 0..100 {
                 tokio::spawn(async move {
                     let mut v = CONCURRENT_LOCK.future_lock().await;
-                    v.push(format!("{}", i));
-                    println!("{:?}", v);
+                    v.push(i.to_string());
+                    println!("{}", v.len());
                 });
             }
         });
