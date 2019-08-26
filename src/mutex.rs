@@ -11,7 +11,7 @@ use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::ptr::null_mut;
-use crossbeam::queue::SegQueue;
+use crossbeam_queue::SegQueue;
 
 use lock_api::{Mutex as Mutex_, RawMutex, MutexGuard};
 
@@ -156,6 +156,8 @@ mod tests {
 
     use lazy_static::lazy_static;
 
+    use log::info;
+
     lazy_static! {
         static ref LOCK1: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         static ref LOCK2: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -164,6 +166,8 @@ mod tests {
 
     #[test]
     fn current_thread_lazy_static() {
+        env_logger::try_init().ok();
+
         let mut runtime = CurrentThreadRuntime::new().unwrap();
         runtime.block_on(async {
             let mut v = LOCK1.future_lock().await;
@@ -174,6 +178,8 @@ mod tests {
 
     #[test]
     fn current_thread_local_arc() {
+        env_logger::try_init().ok();
+
         let lock = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = CurrentThreadRuntime::new().unwrap();
         runtime.block_on(async {
@@ -185,6 +191,8 @@ mod tests {
 
     #[test]
     fn current_thread_local_rc() {
+        env_logger::try_init().ok();
+
         let lock = Rc::new(Mutex::new(Vec::new()));
         let mut runtime = CurrentThreadRuntime::new().unwrap();
         runtime.block_on(async {
@@ -196,6 +204,8 @@ mod tests {
 
     #[test]
     fn current_thread_local_box() {
+        env_logger::try_init().ok();
+
         let lock = Box::new(Mutex::new(Vec::new()));
         let mut runtime = CurrentThreadRuntime::new().unwrap();
         runtime.block_on(async {
@@ -207,6 +217,8 @@ mod tests {
 
     #[test]
     fn multithread_lazy_static() {
+        env_logger::try_init().ok();
+
         let runtime = ThreadpoolRuntime::new().unwrap();
         runtime.block_on(async {
             let mut v = LOCK2.future_lock().await;
@@ -217,6 +229,8 @@ mod tests {
 
     #[test]
     fn multithread_local_arc() {
+        env_logger::try_init().ok();
+
         let lock = Arc::new(Mutex::new(Vec::new()));
         let runtime = ThreadpoolRuntime::new().unwrap();
         runtime.block_on(async {
@@ -228,6 +242,8 @@ mod tests {
 
     #[test]
     fn multithread_local_rc() {
+        env_logger::try_init().ok();
+
         let lock = Rc::new(Mutex::new(Vec::new()));
         let runtime = ThreadpoolRuntime::new().unwrap();
         runtime.block_on(async {
@@ -239,6 +255,8 @@ mod tests {
 
     #[test]
     fn multithread_local_box() {
+        env_logger::try_init().ok();
+
         let lock = Box::new(Mutex::new(Vec::new()));
         let runtime = ThreadpoolRuntime::new().unwrap();
         runtime.block_on(async {
@@ -250,14 +268,16 @@ mod tests {
 
     #[test]
     fn multithread_concurrent_lazy_static() {
+        env_logger::try_init().ok();
+
         let runtime = ThreadpoolRuntime::new().unwrap();
         runtime.block_on(async {
-            // spawn 10 concurrent futures
+            // spawn 100 concurrent futures
             for i in 0..100 {
                 tokio::spawn(async move {
                     let mut v = CONCURRENT_LOCK.future_lock().await;
                     v.push(i.to_string());
-                    println!("{}, pushed {}", v.len(), i);
+                    info!("{}, pushed {}", v.len(), i);
                 });
             }
         });
