@@ -9,7 +9,10 @@ use std::marker::PhantomData;
 use std::future::Future;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
-use std::cell::UnsafeCell;
+// use std::cell::UnsafeCell;
+// use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::ptr::null_mut;
 
 use lock_api::{Mutex as MutexLock, RawMutex, MutexGuard};
 
@@ -20,27 +23,25 @@ pub type Mutex<T> = MutexLock<FutureRawMutex<RawMutexLock>, T>;
 
 /// RawMutex implementor that collects Wakers to wake them up when unlocked
 pub struct FutureRawMutex<R> where R: RawMutex {
-    wakers: UnsafeCell<Option<Vec<Waker>>>,
+    // wakers: UnsafeCell<Option<(Sender<Waker>, Receiver<Waker>)>>,
+    // wakers: UnsafeCell<Option<Vec<Waker>>>,
+    wakers: AtomicPtr<Vec<Waker>>,
     inner: R,
 }
 
 impl<R> FutureRawMutex<R> where R: RawMutex {
-    unsafe fn register_waker(&self, waker: &Waker) {
-        let temp = &mut *self.wakers.get();
-        if temp.is_none() {
-            *temp = Some(Vec::new());
-            eprintln!("waker list created");
-        }
-        else {
-            eprintln!("waker list already existing");
-        }
-        if let Some(ref mut v) = temp {
-            v.push(waker.clone());
-            eprintln!("waker registered");
-        }
-        else {
-            eprintln!("can't register waker");
-        }
+    fn register_waker(&self, waker: &Waker) {
+        // let temp = unsafe { &mut *self.wakers.get() };
+        // if let Some(ref mut v) = temp {
+        //     v.0.send(waker.clone()).unwrap();
+        //     // v.push(waker.clone());
+        //     // eprintln!("waker registered");
+        // }
+        // else {
+        //     // eprintln!("can't register waker");
+        // }
+        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
+        v.push(waker.clone());
     }
 }
 
@@ -51,34 +52,74 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
 
     const INIT: FutureRawMutex<R> = {
         FutureRawMutex {
-            wakers: UnsafeCell::new(None),
+            // wakers: UnsafeCell::new(None),
+            wakers: AtomicPtr::new(null_mut()),
             inner: R::INIT
         }
     };
 
     fn lock(&self) {
+        // let temp = unsafe { &mut *self.wakers.get() };
+        // if temp.is_none() {
+        //     *temp = Some(channel());
+        //     // *temp = Some(Vec::new());
+        //     // eprintln!("waker list created");
+        // }
+        // else {
+        //     // eprintln!("waker list already existing");
+        // }
+        {
+            let v = self.wakers.load(Ordering::Relaxed);
+            if v.is_null() {
+                let temp = Box::new(Vec::new());
+                self.wakers.store(Box::into_raw(temp), Ordering::Relaxed);
+            }
+        }
+
         self.inner.lock();
     }
 
     fn try_lock(&self) -> bool {
+        // let temp = unsafe { &mut *self.wakers.get() };
+        // if temp.is_none() {
+        //     *temp = Some(channel());
+        //     // *temp = Some(Vec::new());
+        //     // eprintln!("waker list created");
+        // }
+        // else {
+        //     // eprintln!("waker list already existing");
+        // }
+        {
+            let v = self.wakers.load(Ordering::Relaxed);
+            if v.is_null() {
+                let temp = Box::new(Vec::new());
+                self.wakers.store(Box::into_raw(temp), Ordering::Relaxed);
+            }
+        }
+
         self.inner.try_lock()
     }
 
     fn unlock(&self) {
         self.inner.unlock();
 
-        unsafe {
-            let temp = &mut *self.wakers.get();
-            if let Some(v) = temp {
-                // let mut waker = v.pop();
-                // while let Some(w) = waker {
-                //     w.wake();
-                //     eprintln!("Task waked up");
-                //     waker = v.pop();
-                // }
-                if let Some(w) = v.pop() {
-                    w.wake();
-                }
+        // let temp = unsafe { &mut *self.wakers.get() };
+        // if let Some(ref mut v) = temp {
+        //     for waker in v.1.try_iter() {
+        //         waker.wake();
+        //     }
+        //     // let mut waker = v.pop();
+        //     // while let Some(w) = waker {
+        //     //     w.wake();
+        //     //     waker = v.pop();
+        //     // }
+        // }
+        {
+            let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
+            let mut waker = v.pop();
+            while let Some(w) = waker {
+                w.wake();
+                waker = v.pop();
             }
         }
     }
