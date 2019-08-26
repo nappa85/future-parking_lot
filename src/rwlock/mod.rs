@@ -5,6 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use std::task::Waker;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::ptr::null_mut;
+use crossbeam::queue::SegQueue;
+
 /// FutureRead module
 pub mod read;
 /// FutureUpgradableRead module
@@ -19,6 +24,90 @@ pub use upgradable_read::FutureUpgradableReadable;
 /// Trait to permit FutureWrite implementation on wrapped RwLock (not RwLock itself)
 pub use write::FutureWriteable;
 
+use lock_api::{RwLock as RwLock_, RawRwLock};
+
+use parking_lot::RawRwLock as RawRwLock_;
+
+/// a Future-compatible parking_lot::RwLock
+pub type RwLock<T> = RwLock_<FutureRawRwLock<RawRwLock_>, T>;
+
+/// RawRwLock implementor that collects Wakers to wake them up when unlocked
+pub struct FutureRawRwLock<R: RawRwLock> {
+    wakers: AtomicPtr<SegQueue<Waker>>,
+    inner: R,
+}
+
+impl<R> FutureRawRwLock<R> where R: RawRwLock {
+    fn register_waker(&self, waker: &Waker) {
+        let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
+        v.push(waker.clone());
+    }
+
+    fn create_wakers_list(&self) {
+        let v = self.wakers.load(Ordering::Acquire);
+        if v.is_null() {
+            let temp = Box::new(SegQueue::new());
+            self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
+        }
+    }
+
+    fn wake_all(&self) {
+        let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
+        let mut waker = v.pop();
+        while let Ok(w) = waker {
+            w.wake();
+            waker = v.pop();
+        }
+    }
+}
+
+unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
+    type GuardMarker = R::GuardMarker;
+
+    const INIT: FutureRawRwLock<R> = {
+        FutureRawRwLock {
+            wakers: AtomicPtr::new(null_mut()),
+            inner: R::INIT
+        }
+    };
+
+    fn lock_shared(&self) {
+        self.create_wakers_list();
+
+        self.inner.lock_shared();
+    }
+
+    fn try_lock_shared(&self) -> bool {
+        self.create_wakers_list();
+
+        self.inner.try_lock_shared()
+    }
+
+    fn unlock_shared(&self) {
+        self.inner.unlock_shared();
+
+        self.wake_all();
+    }
+
+    fn lock_exclusive(&self) {
+        self.create_wakers_list();
+
+        self.inner.lock_exclusive();
+    }
+
+    fn try_lock_exclusive(&self) -> bool {
+        self.create_wakers_list();
+
+        self.inner.try_lock_exclusive()
+    }
+
+    fn unlock_exclusive(&self) {
+        self.inner.unlock_exclusive();
+
+        self.wake_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -27,9 +116,7 @@ mod tests {
     use tokio::runtime::Runtime as ThreadpoolRuntime;
     use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
 
-    use parking_lot::RwLock;
-
-    use super::{FutureReadable, FutureWriteable};
+    use super::{RwLock, FutureReadable, FutureWriteable};
 
     use lazy_static::lazy_static;
 
@@ -166,11 +253,11 @@ mod tests {
                 tokio::spawn(async move {
                     {
                         let mut v = CONCURRENT_LOCK.future_write().await;
-                        v.push(format!("{}", i));
+                        v.push(i.to_string());
                     }
 
                     let v = CONCURRENT_LOCK.future_read().await;
-                    println!("{:?}", v);
+                    println!("{}, pushed {}", v.len(), i);
                 });
             }
         });

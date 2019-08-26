@@ -10,9 +10,41 @@ use std::future::Future;
 use std::task::{Poll, Context};
 use std::pin::Pin;
 
-// use future_utils::*;
-
 use lock_api::{RwLock, RawRwLockUpgrade, RwLockUpgradableReadGuard};
+
+use super::FutureRawRwLock;
+
+unsafe impl<R> RawRwLockUpgrade for FutureRawRwLock<R> where R: RawRwLockUpgrade {
+    fn lock_upgradable(&self) {
+        self.create_wakers_list();
+
+        self.inner.lock_upgradable();
+    }
+
+    fn try_lock_upgradable(&self) -> bool {
+        self.create_wakers_list();
+
+        self.inner.try_lock_upgradable()
+    }
+
+    fn unlock_upgradable(&self)  {
+        self.inner.unlock_upgradable();
+
+        self.wake_all();
+    }
+
+    fn upgrade(&self) {
+        self.create_wakers_list();
+
+        self.inner.upgrade();
+    }
+
+    fn try_upgrade(&self) -> bool {
+        self.create_wakers_list();
+
+        self.inner.try_upgrade()
+    }
+}
 
 /// Wrapper to upgradable-read from RwLock in Future-style
 pub struct FutureUpgradableRead<'a, R, T>
@@ -20,7 +52,7 @@ where
     R: RawRwLockUpgrade + 'a,
     T: 'a,
 {
-    lock: &'a RwLock<R, T>,
+    lock: &'a RwLock<FutureRawRwLock<R>, T>,
     _contents: PhantomData<T>,
     _locktype: PhantomData<R>,
 }
@@ -30,7 +62,7 @@ where
     R: RawRwLockUpgrade + 'a,
     T: 'a,
 {
-    fn new(lock: &'a RwLock<R, T>) -> Self {
+    fn new(lock: &'a RwLock<FutureRawRwLock<R>, T>) -> Self {
         FutureUpgradableRead {
             lock,
             _contents: PhantomData,
@@ -44,14 +76,14 @@ where
     R: RawRwLockUpgrade + 'a,
     T: 'a,
 {
-    type Output = RwLockUpgradableReadGuard<'a, R, T>;
+    type Output = RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match self.lock.try_upgradable_read() {
             Some(upgradable_lock) => Poll::Ready(upgradable_lock),
             None => {
-                // Notify current Task we can be polled again
-                cx.waker().wake_by_ref();
+                // Register Waker so we can notified when we can be polled again
+                unsafe { self.lock.raw().register_waker(cx.waker()); }
                 Poll::Pending
             },
         }
@@ -64,7 +96,7 @@ pub trait FutureUpgradableReadable<R: RawRwLockUpgrade, T> {
     fn future_upgradable_read(&self) -> FutureUpgradableRead<R, T>;
 }
 
-impl<R: RawRwLockUpgrade, T> FutureUpgradableReadable<R, T> for RwLock<R, T> {
+impl<R: RawRwLockUpgrade, T> FutureUpgradableReadable<R, T> for RwLock<FutureRawRwLock<R>, T> {
     fn future_upgradable_read(&self) -> FutureUpgradableRead<R, T> {
         FutureUpgradableRead::new(self)
     }

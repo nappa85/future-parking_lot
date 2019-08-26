@@ -9,99 +9,65 @@ use std::marker::PhantomData;
 use std::future::Future;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
-// use std::cell::UnsafeCell;
-// use std::sync::mpsc::{channel, Sender, Receiver};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::ptr::null_mut;
 use crossbeam::queue::SegQueue;
 
-use lock_api::{Mutex as MutexLock, RawMutex, MutexGuard};
+use lock_api::{Mutex as Mutex_, RawMutex, MutexGuard};
 
-use parking_lot::RawMutex as RawMutexLock;
+use parking_lot::RawMutex as RawMutex_;
 
 /// a Future-compatible parking_lot::Mutex
-pub type Mutex<T> = MutexLock<FutureRawMutex<RawMutexLock>, T>;
+pub type Mutex<T> = Mutex_<FutureRawMutex<RawMutex_>, T>;
 
 /// RawMutex implementor that collects Wakers to wake them up when unlocked
 pub struct FutureRawMutex<R> where R: RawMutex {
-    // wakers: UnsafeCell<Option<(Sender<Waker>, Receiver<Waker>)>>,
-    // wakers: UnsafeCell<Option<Vec<Waker>>>,
-    // wakers: AtomicPtr<Vec<Waker>>,
-    // wakers: AtomicPtr<(Sender<Waker>, Receiver<Waker>)>,
     wakers: AtomicPtr<SegQueue<Waker>>,
     inner: R,
 }
 
 impl<R> FutureRawMutex<R> where R: RawMutex {
     fn register_waker(&self, waker: &Waker) {
-        // let temp = unsafe { &mut *self.wakers.get() };
-        // if let Some(ref mut v) = temp {
-        //     v.0.send(waker.clone()).unwrap();
-        //     v.push(waker.clone());
-        //     // eprintln!("waker registered");
-        // }
-        // else {
-        //     // eprintln!("can't register waker");
-        // }
         let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
         v.push(waker.clone());
-        // v.0.send(waker.clone()).unwrap();
+    }
+
+    fn create_wakers_list(&self) {
+        let v = self.wakers.load(Ordering::Acquire);
+        if v.is_null() {
+            let temp = Box::new(SegQueue::new());
+            self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
+        }
+    }
+
+    fn wake_all(&self) {
+        let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
+        let mut waker = v.pop();
+        while let Ok(w) = waker {
+            w.wake();
+            waker = v.pop();
+        }
     }
 }
-
-unsafe impl<R> Sync for FutureRawMutex<R> where R: RawMutex {}
 
 unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
     type GuardMarker = R::GuardMarker;
 
     const INIT: FutureRawMutex<R> = {
         FutureRawMutex {
-            // wakers: UnsafeCell::new(None),
             wakers: AtomicPtr::new(null_mut()),
             inner: R::INIT
         }
     };
 
     fn lock(&self) {
-        // let temp = unsafe { &mut *self.wakers.get() };
-        // if temp.is_none() {
-        //     *temp = Some(channel());
-        //     *temp = Some(Vec::new());
-        //     // eprintln!("waker list created");
-        // }
-        // else {
-        //     // eprintln!("waker list already existing");
-        // }
-        {
-            let v = self.wakers.load(Ordering::Acquire);
-            if v.is_null() {
-                // let temp = Box::new(channel());
-                let temp = Box::new(SegQueue::new());
-                self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
-            }
-        }
+        self.create_wakers_list();
 
         self.inner.lock();
     }
 
     fn try_lock(&self) -> bool {
-        // let temp = unsafe { &mut *self.wakers.get() };
-        // if temp.is_none() {
-        //     *temp = Some(channel());
-        //     *temp = Some(Vec::new());
-        //     // eprintln!("waker list created");
-        // }
-        // else {
-        //     // eprintln!("waker list already existing");
-        // }
-        {
-            let v = self.wakers.load(Ordering::Acquire);
-            if v.is_null() {
-                // let temp = Box::new(channel());
-                let temp = Box::new(SegQueue::new());
-                self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
-            }
-        }
+        self.create_wakers_list();
 
         self.inner.try_lock()
     }
@@ -109,30 +75,7 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
     fn unlock(&self) {
         self.inner.unlock();
 
-        // let temp = unsafe { &mut *self.wakers.get() };
-        // if let Some(ref mut v) = temp {
-        //     for waker in v.1.try_iter() {
-        //         waker.wake();
-        //     }
-        //     let mut waker = v.pop();
-        //     while let Some(w) = waker {
-        //         w.wake();
-        //         waker = v.pop();
-        //     }
-        // }
-        {
-            let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
-            let mut waker = v.pop();
-            while let Ok(w) = waker {
-                w.wake();
-                waker = v.pop();
-            }
-            // let mut waker = v.1.try_recv();
-            // while let Ok(w) = waker {
-            //     w.wake();
-            //     waker = v.1.try_recv();
-            // }
-        }
+        self.wake_all();
     }
 }
 
@@ -142,7 +85,7 @@ where
     R: RawMutex + 'a,
     T: 'a,
 {
-    lock: &'a MutexLock<FutureRawMutex<R>, T>,
+    lock: &'a Mutex_<FutureRawMutex<R>, T>,
     _contents: PhantomData<T>,
     _locktype: PhantomData<R>,
 }
@@ -152,7 +95,7 @@ where
     R: RawMutex + 'a,
     T: 'a,
 {
-    fn new(lock: &'a MutexLock<FutureRawMutex<R>, T>) -> Self {
+    fn new(lock: &'a Mutex_<FutureRawMutex<R>, T>) -> Self {
         FutureLock {
             lock,
             _contents: PhantomData,
@@ -186,17 +129,11 @@ pub trait FutureLockable<R: RawMutex, T> {
     fn future_lock(&self) -> FutureLock<R, T>;
 }
 
-impl<R: RawMutex, T> FutureLockable<R, T> for MutexLock<FutureRawMutex<R>, T> {
+impl<R: RawMutex, T> FutureLockable<R, T> for Mutex_<FutureRawMutex<R>, T> {
     fn future_lock(&self) -> FutureLock<R, T> {
         FutureLock::new(self)
     }
 }
-
-// impl<L: AsRef<Mutex<R, T>>, R: RawMutex, T> FutureLockable<R, T> for L {
-//     fn future_lock(&self) -> FutureLock<R, T> {
-//         FutureLock::new(self.as_ref())
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -313,7 +250,7 @@ mod tests {
                 tokio::spawn(async move {
                     let mut v = CONCURRENT_LOCK.future_lock().await;
                     v.push(i.to_string());
-                    println!("{}", v.len());
+                    println!("{}, pushed {}", v.len(), i);
                 });
             }
         });

@@ -10,9 +10,9 @@ use std::future::Future;
 use std::task::{Poll, Context};
 use std::pin::Pin;
 
-// use future_utils::*;
-
 use lock_api::{RwLock, RawRwLock, RwLockWriteGuard};
+
+use super::FutureRawRwLock;
 
 /// Wrapper to write into RwLock in Future-style
 pub struct FutureWrite<'a, R, T>
@@ -20,7 +20,7 @@ where
     R: RawRwLock + 'a,
     T: 'a,
 {
-    lock: &'a RwLock<R, T>,
+    lock: &'a RwLock<FutureRawRwLock<R>, T>,
     _contents: PhantomData<T>,
     _locktype: PhantomData<R>,
 }
@@ -30,7 +30,7 @@ where
     R: RawRwLock + 'a,
     T: 'a,
 {
-    fn new(lock: &'a RwLock<R, T>) -> Self {
+    fn new(lock: &'a RwLock<FutureRawRwLock<R>, T>) -> Self {
         FutureWrite {
             lock,
             _contents: PhantomData,
@@ -44,14 +44,14 @@ where
     R: RawRwLock + 'a,
     T: 'a,
 {
-    type Output = RwLockWriteGuard<'a, R, T>;
+    type Output = RwLockWriteGuard<'a, FutureRawRwLock<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match self.lock.try_write() {
             Some(write_lock) => Poll::Ready(write_lock),
             None => {
-                // Notify current Task we can be polled again
-                cx.waker().wake_by_ref();
+                // Register Waker so we can notified when we can be polled again
+                unsafe { self.lock.raw().register_waker(cx.waker()); }
                 Poll::Pending
             },
         }
@@ -64,7 +64,7 @@ pub trait FutureWriteable<R: RawRwLock, T> {
     fn future_write(&self) -> FutureWrite<R, T>;
 }
 
-impl<R: RawRwLock, T> FutureWriteable<R, T> for RwLock<R, T> {
+impl<R: RawRwLock, T> FutureWriteable<R, T> for RwLock<FutureRawRwLock<R>, T> {
     fn future_write(&self) -> FutureWrite<R, T> {
         FutureWrite::new(self)
     }
