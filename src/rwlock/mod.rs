@@ -39,24 +39,22 @@ pub struct FutureRawRwLock<R: RawRwLock> {
 
 impl<R> FutureRawRwLock<R> where R: RawRwLock {
     fn register_waker(&self, waker: &Waker) {
-        let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
+        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
         v.push(waker.clone());
     }
 
     fn create_wakers_list(&self) {
-        let v = self.wakers.load(Ordering::Acquire);
+        let v = self.wakers.load(Ordering::Relaxed);
         if v.is_null() {
             let temp = Box::new(SegQueue::new());
-            self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Acquire);
+            self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Relaxed);
         }
     }
 
     fn wake_all(&self) {
-        let v = unsafe { &mut *self.wakers.load(Ordering::Acquire) };
-        let mut waker = v.pop();
-        while let Ok(w) = waker {
+        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
+        if let Ok(w) = v.pop() {
             w.wake();
-            waker = v.pop();
         }
     }
 }
