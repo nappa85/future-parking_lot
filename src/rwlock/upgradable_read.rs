@@ -30,7 +30,7 @@ unsafe impl<R> RawRwLockUpgrade for FutureRawRwLock<R> where R: RawRwLockUpgrade
     fn unlock_upgradable(&self)  {
         self.inner.unlock_upgradable();
 
-        self.wake_all();
+        self.wake_up();
     }
 
     fn upgrade(&self) {
@@ -79,8 +79,12 @@ where
     type Output = RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        unsafe { self.lock.raw().atomic_lock(); }
         match self.lock.try_upgradable_read() {
-            Some(upgradable_lock) => Poll::Ready(upgradable_lock),
+            Some(upgradable_lock) => {
+                unsafe { self.lock.raw().atomic_unlock(); }
+                Poll::Ready(upgradable_lock)
+            },
             None => {
                 // Register Waker so we can notified when we can be polled again
                 unsafe { self.lock.raw().register_waker(cx.waker()); }

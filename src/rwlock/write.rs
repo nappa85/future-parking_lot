@@ -47,8 +47,12 @@ where
     type Output = RwLockWriteGuard<'a, FutureRawRwLock<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        unsafe { self.lock.raw().atomic_lock(); }
         match self.lock.try_write() {
-            Some(write_lock) => Poll::Ready(write_lock),
+            Some(write_lock) => {
+                unsafe { self.lock.raw().atomic_unlock(); }
+                Poll::Ready(write_lock)
+            },
             None => {
                 // Register Waker so we can notified when we can be polled again
                 unsafe { self.lock.raw().register_waker(cx.waker()); }

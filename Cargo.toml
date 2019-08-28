@@ -1,6 +1,6 @@
 [package]
 name = "future-parking_lot"
-version = "0.3.1-alpha.2"
+version = "0.3.2-alpha.2"
 authors = ["Marco Napetti <marco.napetti@gmail.com>"]
 edition = "2018"
 description = "An \"as simple as possible\" Future implementation for parking_lot"

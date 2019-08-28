@@ -6,7 +6,7 @@
 // copied, modified, or distributed except according to those terms.
 
 use std::task::Waker;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::ptr::null_mut;
 use crossbeam_queue::SegQueue;
 
@@ -33,14 +33,31 @@ pub type RwLock<T> = RwLock_<FutureRawRwLock<RawRwLock_>, T>;
 
 /// RawRwLock implementor that collects Wakers to wake them up when unlocked
 pub struct FutureRawRwLock<R: RawRwLock> {
+    locking: AtomicBool,
     wakers: AtomicPtr<SegQueue<Waker>>,
     inner: R,
 }
 
 impl<R> FutureRawRwLock<R> where R: RawRwLock {
+    // this is needed to avoid sequences like that:
+    // * thread 1 gains lock
+    // * thread 2 try lock
+    // * thread 1 unlock
+    // * thread 2 register waker
+    // this creates a situation similar to a deadlock, where the future isn't waked up by nobody
+    fn atomic_lock(&self) {
+        while self.locking.compare_and_swap(false, true, Ordering::Relaxed) {}
+    }
+
+    fn atomic_unlock(&self) {
+        self.locking.store(false, Ordering::Relaxed);
+    }
+
     fn register_waker(&self, waker: &Waker) {
         let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
         v.push(waker.clone());
+        // implicitly unlock
+        self.atomic_unlock();
     }
 
     fn create_wakers_list(&self) {
@@ -51,11 +68,13 @@ impl<R> FutureRawRwLock<R> where R: RawRwLock {
         }
     }
 
-    fn wake_all(&self) {
+    fn wake_up(&self) {
+        self.atomic_lock();
         let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
         if let Ok(w) = v.pop() {
             w.wake();
         }
+        self.atomic_unlock();
     }
 }
 
@@ -73,6 +92,7 @@ unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
 
     const INIT: FutureRawRwLock<R> = {
         FutureRawRwLock {
+            locking: AtomicBool::new(false),
             wakers: AtomicPtr::new(null_mut()),
             inner: R::INIT
         }
@@ -93,7 +113,7 @@ unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
     fn unlock_shared(&self) {
         self.inner.unlock_shared();
 
-        self.wake_all();
+        self.wake_up();
     }
 
     fn lock_exclusive(&self) {
@@ -111,7 +131,7 @@ unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
     fn unlock_exclusive(&self) {
         self.inner.unlock_exclusive();
 
-        self.wake_all();
+        self.wake_up();
     }
 }
 
