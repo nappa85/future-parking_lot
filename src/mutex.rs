@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::future::Future;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::ptr::null_mut;
 use crossbeam_queue::SegQueue;
 
@@ -22,14 +22,31 @@ pub type Mutex<T> = Mutex_<FutureRawMutex<RawMutex_>, T>;
 
 /// RawMutex implementor that collects Wakers to wake them up when unlocked
 pub struct FutureRawMutex<R> where R: RawMutex {
+    locking: AtomicBool,
     wakers: AtomicPtr<SegQueue<Waker>>,
     inner: R,
 }
 
 impl<R> FutureRawMutex<R> where R: RawMutex {
+    // this is needed to avoid sequences like that:
+    // * thread 1 gains lock
+    // * thread 2 try lock
+    // * thread 1 unlock
+    // * thread 2 register waker
+    // this creates a situation similar to a deadlock, where the future isn't waked up by nobody
+    fn atomic_lock(&self) {
+        while self.locking.compare_and_swap(false, true, Ordering::Relaxed) {}
+    }
+
+    fn atomic_unlock(&self) {
+        self.locking.store(false, Ordering::Relaxed);
+    }
+
     fn register_waker(&self, waker: &Waker) {
         let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
         v.push(waker.clone());
+        // implicitly unlock
+        self.atomic_unlock();
     }
 
     fn create_wakers_list(&self) {
@@ -40,11 +57,13 @@ impl<R> FutureRawMutex<R> where R: RawMutex {
         }
     }
 
-    fn wake_all(&self) {
+    fn wake_up(&self) {
+        self.atomic_lock();
         let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
         if let Ok(w) = v.pop() {
             w.wake();
         }
+        self.atomic_unlock();
     }
 }
 
@@ -62,6 +81,7 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
 
     const INIT: FutureRawMutex<R> = {
         FutureRawMutex {
+            locking: AtomicBool::new(false),
             wakers: AtomicPtr::new(null_mut()),
             inner: R::INIT
         }
@@ -82,7 +102,7 @@ unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
     fn unlock(&self) {
         self.inner.unlock();
 
-        self.wake_all();
+        self.wake_up();
     }
 }
 
@@ -119,8 +139,12 @@ where
     type Output = MutexGuard<'a, FutureRawMutex<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        unsafe { self.lock.raw().atomic_lock(); }
         match self.lock.try_lock() {
-            Some(read_lock) => Poll::Ready(read_lock),
+            Some(read_lock) => {
+                unsafe { self.lock.raw().atomic_unlock(); }
+                Poll::Ready(read_lock)
+            },
             None => {
                 // Register Waker so we can notified when we can be polled again
                 unsafe { self.lock.raw().register_waker(cx.waker()); }
@@ -156,7 +180,7 @@ mod tests {
 
     use lazy_static::lazy_static;
 
-    use log::info;
+    use log::debug;
 
     lazy_static! {
         static ref LOCK1: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -272,17 +296,17 @@ mod tests {
 
         let runtime = ThreadpoolRuntime::new().unwrap();
         runtime.block_on(async {
-            // spawn 100 concurrent futures
-            for i in 0..100 {
+            // spawn 1000 concurrent futures
+            for i in 0..1000 {
                 tokio::spawn(async move {
                     let mut v = CONCURRENT_LOCK.future_lock().await;
                     v.push(i.to_string());
-                    info!("{}, pushed {}", v.len(), i);
+                    debug!("{}, pushed {}", v.len(), i);
                 });
             }
         });
         runtime.shutdown_on_idle();
         let singleton = CONCURRENT_LOCK.lock();
-        assert_eq!(singleton.len(), 100);
+        assert_eq!(singleton.len(), 1000);
     }
 }
