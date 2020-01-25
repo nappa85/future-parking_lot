@@ -7,6 +7,9 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
 
+//Re-export `parking_lot` to avoid version mismatch
+pub use parking_lot;
+
 //! # future-parking_lot
 //!
 //! A simple Future implementation for parking_lot
