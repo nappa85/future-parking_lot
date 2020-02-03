@@ -15,3 +15,6 @@
 pub mod mutex;
 /// parking_lot::RwLock Future implementation
 pub mod rwlock;
+
+//Re-export `parking_lot` to avoid version mismatch
+pub use parking_lot;
