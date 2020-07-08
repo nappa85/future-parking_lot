@@ -88,7 +88,7 @@ where
         self.inner.try_lock()
     }
 
-    fn unlock(&self) {
+    unsafe fn unlock(&self) {
         self.inner.unlock();
 
         self.wake_up();

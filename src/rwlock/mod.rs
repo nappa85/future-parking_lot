@@ -96,7 +96,7 @@ where
         self.inner.try_lock_shared()
     }
 
-    fn unlock_shared(&self) {
+    unsafe fn unlock_shared(&self) {
         self.inner.unlock_shared();
 
         self.wake_up();
@@ -110,7 +110,7 @@ where
         self.inner.try_lock_exclusive()
     }
 
-    fn unlock_exclusive(&self) {
+    unsafe fn unlock_exclusive(&self) {
         self.inner.unlock_exclusive();
 
         self.wake_up();

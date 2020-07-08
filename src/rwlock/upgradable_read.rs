@@ -26,17 +26,17 @@ where
         self.inner.try_lock_upgradable()
     }
 
-    fn unlock_upgradable(&self) {
+    unsafe fn unlock_upgradable(&self) {
         self.inner.unlock_upgradable();
 
         self.wake_up();
     }
 
-    fn upgrade(&self) {
+    unsafe fn upgrade(&self) {
         self.inner.upgrade();
     }
 
-    fn try_upgrade(&self) -> bool {
+    unsafe fn try_upgrade(&self) -> bool {
         self.inner.try_upgrade()
     }
 }
