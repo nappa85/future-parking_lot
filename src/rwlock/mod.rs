@@ -16,11 +16,8 @@ pub mod upgradable_read;
 /// FutureWrite module
 pub mod write;
 
-/// Trait to permit FutureRead implementation on wrapped RwLock (not RwLock itself)
 pub use read::FutureReadable;
-/// Trait to permit FutureUpgradableRead implementation on wrapped RwLock (not RwLock itself)
-pub use upgradable_read::FutureUpgradableReadable;
-/// Trait to permit FutureWrite implementation on wrapped RwLock (not RwLock itself)
+pub use upgradable_read::{FutureUpgradable, FutureUpgradableReadable};
 pub use write::FutureWriteable;
 
 use lock_api::{RawRwLock, RwLock as RwLock_};
