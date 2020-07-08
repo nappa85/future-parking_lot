@@ -5,10 +5,10 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::task::Waker;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::ptr::null_mut;
 use crossbeam_queue::SegQueue;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Waker;
 
 /// FutureRead module
 pub mod read;
@@ -24,7 +24,7 @@ pub use upgradable_read::FutureUpgradableReadable;
 /// Trait to permit FutureWrite implementation on wrapped RwLock (not RwLock itself)
 pub use write::FutureWriteable;
 
-use lock_api::{RwLock as RwLock_, RawRwLock};
+use lock_api::{RawRwLock, RwLock as RwLock_};
 
 use parking_lot::RawRwLock as RawRwLock_;
 
@@ -34,11 +34,14 @@ pub type RwLock<T> = RwLock_<FutureRawRwLock<RawRwLock_>, T>;
 /// RawRwLock implementor that collects Wakers to wake them up when unlocked
 pub struct FutureRawRwLock<R: RawRwLock> {
     locking: AtomicBool,
-    wakers: AtomicPtr<SegQueue<Waker>>,
+    wakers: Lazy<SegQueue<Waker>>,
     inner: R,
 }
 
-impl<R> FutureRawRwLock<R> where R: RawRwLock {
+impl<R> FutureRawRwLock<R>
+where
+    R: RawRwLock,
+{
     // this is needed to avoid sequences like that:
     // * thread 1 gains lock
     // * thread 2 try lock
@@ -46,7 +49,10 @@ impl<R> FutureRawRwLock<R> where R: RawRwLock {
     // * thread 2 register waker
     // this creates a situation similar to a deadlock, where the future isn't waked up by nobody
     fn atomic_lock(&self) {
-        while self.locking.compare_and_swap(false, true, Ordering::Relaxed) {}
+        while self
+            .locking
+            .compare_and_swap(false, true, Ordering::Relaxed)
+        {}
     }
 
     fn atomic_unlock(&self) {
@@ -54,59 +60,39 @@ impl<R> FutureRawRwLock<R> where R: RawRwLock {
     }
 
     fn register_waker(&self, waker: &Waker) {
-        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
-        v.push(waker.clone());
+        self.wakers.push(waker.clone());
         // implicitly unlock
         self.atomic_unlock();
     }
 
-    fn create_wakers_list(&self) {
-        let v = self.wakers.load(Ordering::Relaxed);
-        if v.is_null() {
-            let temp = Box::new(SegQueue::new());
-            self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Relaxed);
-        }
-    }
-
     fn wake_up(&self) {
         self.atomic_lock();
-        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
-        if let Ok(w) = v.pop() {
+        if let Ok(w) = self.wakers.pop() {
             w.wake();
         }
         self.atomic_unlock();
     }
 }
 
-impl<R> Drop for FutureRawRwLock<R> where R: RawRwLock {
-    fn drop(&mut self) {
-        let v = self.wakers.load(Ordering::Relaxed);
-        if !v.is_null() {
-            unsafe { Box::from_raw(v) };
-        }
-    }
-}
-
-unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
+unsafe impl<R> RawRwLock for FutureRawRwLock<R>
+where
+    R: RawRwLock,
+{
     type GuardMarker = R::GuardMarker;
 
     const INIT: FutureRawRwLock<R> = {
         FutureRawRwLock {
             locking: AtomicBool::new(false),
-            wakers: AtomicPtr::new(null_mut()),
-            inner: R::INIT
+            wakers: Lazy::new(SegQueue::new),
+            inner: R::INIT,
         }
     };
 
     fn lock_shared(&self) {
-        self.create_wakers_list();
-
         self.inner.lock_shared();
     }
 
     fn try_lock_shared(&self) -> bool {
-        self.create_wakers_list();
-
         self.inner.try_lock_shared()
     }
 
@@ -117,14 +103,10 @@ unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
     }
 
     fn lock_exclusive(&self) {
-        self.create_wakers_list();
-
         self.inner.lock_exclusive();
     }
 
     fn try_lock_exclusive(&self) -> bool {
-        self.create_wakers_list();
-
         self.inner.try_lock_exclusive()
     }
 
@@ -137,13 +119,13 @@ unsafe impl<R> RawRwLock for FutureRawRwLock<R> where R: RawRwLock {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::rc::Rc;
+    use std::sync::Arc;
 
-    use tokio::runtime::Runtime as ThreadpoolRuntime;
     use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
+    use tokio::runtime::Runtime as ThreadpoolRuntime;
 
-    use super::{RwLock, FutureReadable, FutureWriteable};
+    use super::{FutureReadable, FutureWriteable, RwLock};
 
     use lazy_static::lazy_static;
 

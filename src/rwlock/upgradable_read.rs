@@ -5,43 +5,38 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::marker::PhantomData;
 use std::future::Future;
-use std::task::{Poll, Context};
+use std::marker::PhantomData;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use lock_api::{RwLock, RawRwLockUpgrade, RwLockUpgradableReadGuard};
+use lock_api::{RawRwLockUpgrade, RwLock, RwLockUpgradableReadGuard};
 
 use super::FutureRawRwLock;
 
-unsafe impl<R> RawRwLockUpgrade for FutureRawRwLock<R> where R: RawRwLockUpgrade {
+unsafe impl<R> RawRwLockUpgrade for FutureRawRwLock<R>
+where
+    R: RawRwLockUpgrade,
+{
     fn lock_upgradable(&self) {
-        self.create_wakers_list();
-
         self.inner.lock_upgradable();
     }
 
     fn try_lock_upgradable(&self) -> bool {
-        self.create_wakers_list();
-
         self.inner.try_lock_upgradable()
     }
 
-    fn unlock_upgradable(&self)  {
+    fn unlock_upgradable(&self) {
         self.inner.unlock_upgradable();
 
         self.wake_up();
     }
 
     fn upgrade(&self) {
-        self.create_wakers_list();
-
         self.inner.upgrade();
     }
 
     fn try_upgrade(&self) -> bool {
-        self.create_wakers_list();
-
         self.inner.try_upgrade()
     }
 }
@@ -79,17 +74,23 @@ where
     type Output = RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        unsafe { self.lock.raw().atomic_lock(); }
+        unsafe {
+            self.lock.raw().atomic_lock();
+        }
         match self.lock.try_upgradable_read() {
             Some(upgradable_lock) => {
-                unsafe { self.lock.raw().atomic_unlock(); }
+                unsafe {
+                    self.lock.raw().atomic_unlock();
+                }
                 Poll::Ready(upgradable_lock)
-            },
+            }
             None => {
                 // Register Waker so we can notified when we can be polled again
-                unsafe { self.lock.raw().register_waker(cx.waker()); }
+                unsafe {
+                    self.lock.raw().register_waker(cx.waker());
+                }
                 Poll::Pending
-            },
+            }
         }
     }
 }
