@@ -6,7 +6,6 @@
 // copied, modified, or distributed except according to those terms.
 
 use crossbeam_queue::SegQueue;
-use once_cell::sync::Lazy;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -26,7 +25,7 @@ where
     R: RawMutex,
 {
     locking: AtomicBool,
-    wakers: Lazy<SegQueue<Waker>>,
+    wakers: SegQueue<Waker>,
     inner: R,
 }
 
@@ -59,7 +58,7 @@ where
 
     fn wake_up(&self) {
         self.atomic_lock();
-        if let Ok(w) = self.wakers.pop() {
+        if let Some(w) = self.wakers.pop() {
             w.wake();
         }
         self.atomic_unlock();
@@ -75,7 +74,7 @@ where
     const INIT: FutureRawMutex<R> = {
         FutureRawMutex {
             locking: AtomicBool::new(false),
-            wakers: Lazy::new(SegQueue::new),
+            wakers: SegQueue::new(),
             inner: R::INIT,
         }
     };

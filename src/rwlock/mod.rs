@@ -6,7 +6,6 @@
 // copied, modified, or distributed except according to those terms.
 
 use crossbeam_queue::SegQueue;
-use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Waker;
 
@@ -34,7 +33,7 @@ pub type RwLock<T> = RwLock_<FutureRawRwLock<RawRwLock_>, T>;
 /// RawRwLock implementor that collects Wakers to wake them up when unlocked
 pub struct FutureRawRwLock<R: RawRwLock> {
     locking: AtomicBool,
-    wakers: Lazy<SegQueue<Waker>>,
+    wakers: SegQueue<Waker>,
     inner: R,
 }
 
@@ -67,7 +66,7 @@ where
 
     fn wake_up(&self) {
         self.atomic_lock();
-        if let Ok(w) = self.wakers.pop() {
+        if let Some(w) = self.wakers.pop() {
             w.wake();
         }
         self.atomic_unlock();
@@ -83,7 +82,7 @@ where
     const INIT: FutureRawRwLock<R> = {
         FutureRawRwLock {
             locking: AtomicBool::new(false),
-            wakers: Lazy::new(SegQueue::new),
+            wakers: SegQueue::new(),
             inner: R::INIT,
         }
     };
