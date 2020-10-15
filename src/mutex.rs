@@ -7,7 +7,6 @@
 
 use crossbeam_queue::SegQueue;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
@@ -101,8 +100,6 @@ where
     T: 'a,
 {
     lock: &'a Mutex_<FutureRawMutex<R>, T>,
-    _contents: PhantomData<T>,
-    _locktype: PhantomData<R>,
 }
 
 impl<'a, R, T> FutureLock<'a, R, T>
@@ -111,11 +108,7 @@ where
     T: 'a,
 {
     fn new(lock: &'a Mutex_<FutureRawMutex<R>, T>) -> Self {
-        FutureLock {
-            lock,
-            _contents: PhantomData,
-            _locktype: PhantomData,
-        }
+        FutureLock { lock }
     }
 }
 
@@ -164,9 +157,9 @@ impl<R: RawMutex, T> FutureLockable<R, T> for Mutex_<FutureRawMutex<R>, T> {
 mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::time::Duration;
 
-    use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
-    use tokio::runtime::Runtime as ThreadpoolRuntime;
+    use tokio::runtime::{Builder, Runtime};
 
     use super::Mutex;
 
@@ -182,11 +175,18 @@ mod tests {
         static ref CONCURRENT_LOCK: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     }
 
+    fn thread_rt() -> Runtime {
+        Builder::new().basic_scheduler().build().unwrap()
+    }
+    fn threadpool_rt() -> Runtime {
+        Builder::new().threaded_scheduler().build().unwrap()
+    }
+
     #[test]
     fn current_thread_lazy_static() {
         env_logger::try_init().ok();
 
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        let mut runtime = thread_rt();
         runtime.block_on(async {
             let mut v = LOCK1.future_lock().await;
             v.push(String::from("It works!"));
@@ -199,7 +199,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        let mut runtime = thread_rt();
         runtime.block_on(async {
             let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
@@ -212,7 +212,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Rc::new(Mutex::new(Vec::new()));
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        let mut runtime = thread_rt();
         runtime.block_on(async {
             let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
@@ -225,7 +225,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Box::new(Mutex::new(Vec::new()));
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
+        let mut runtime = thread_rt();
         runtime.block_on(async {
             let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
@@ -237,7 +237,7 @@ mod tests {
     fn multithread_lazy_static() {
         env_logger::try_init().ok();
 
-        let runtime = ThreadpoolRuntime::new().unwrap();
+        let mut runtime = threadpool_rt();
         runtime.block_on(async {
             let mut v = LOCK2.future_lock().await;
             v.push(String::from("It works!"));
@@ -250,7 +250,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Arc::new(Mutex::new(Vec::new()));
-        let runtime = ThreadpoolRuntime::new().unwrap();
+        let mut runtime = threadpool_rt();
         runtime.block_on(async {
             let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
@@ -263,7 +263,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Rc::new(Mutex::new(Vec::new()));
-        let runtime = ThreadpoolRuntime::new().unwrap();
+        let mut runtime = threadpool_rt();
         runtime.block_on(async {
             let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
@@ -276,7 +276,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Box::new(Mutex::new(Vec::new()));
-        let runtime = ThreadpoolRuntime::new().unwrap();
+        let mut runtime = threadpool_rt();
         runtime.block_on(async {
             let mut v = lock.future_lock().await;
             v.push(String::from("It works!"));
@@ -288,8 +288,8 @@ mod tests {
     fn multithread_concurrent_lazy_static() {
         env_logger::try_init().ok();
 
-        let runtime = ThreadpoolRuntime::new().unwrap();
-        runtime.block_on(async {
+        let runtime = threadpool_rt();
+        runtime.enter(|| {
             // spawn 1000 concurrent futures
             for i in 0..1000 {
                 tokio::spawn(async move {
@@ -299,7 +299,9 @@ mod tests {
                 });
             }
         });
-        runtime.shutdown_on_idle();
+        // fails if you drop it normally, takes as long as the Duration you give it for shutdown_timeout
+        // maybe cause it's 1000 while the others are 100?
+        runtime.shutdown_timeout(Duration::from_millis(500));
         let singleton = CONCURRENT_LOCK.lock();
         assert_eq!(singleton.len(), 1000);
     }

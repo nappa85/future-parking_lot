@@ -6,7 +6,6 @@
 // copied, modified, or distributed except according to those terms.
 
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -44,12 +43,9 @@ where
 /// Wrapper to upgradable-read from RwLock in Future-style
 pub struct FutureUpgradableRead<'a, R, T>
 where
-    R: RawRwLockUpgrade + 'a,
-    T: 'a,
+    R: RawRwLockUpgrade,
 {
     lock: &'a RwLock<FutureRawRwLock<R>, T>,
-    _contents: PhantomData<T>,
-    _locktype: PhantomData<R>,
 }
 
 impl<'a, R, T> FutureUpgradableRead<'a, R, T>
@@ -58,11 +54,7 @@ where
     T: 'a,
 {
     fn new(lock: &'a RwLock<FutureRawRwLock<R>, T>) -> Self {
-        FutureUpgradableRead {
-            lock,
-            _contents: PhantomData,
-            _locktype: PhantomData,
-        }
+        FutureUpgradableRead { lock }
     }
 }
 
@@ -115,8 +107,6 @@ pin_project_lite::pin_project! {
         T: ?Sized,
     {
         rlock: Option<RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>>,
-        _contents: PhantomData<T>,
-        _locktype: PhantomData<R>,
     }
 }
 
@@ -163,10 +153,6 @@ impl<'a, R: RawRwLockUpgrade, T: ?Sized> FutureUpgradable<'a, R, T>
     for RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>
 {
     fn future_upgrade(s: Self) -> FutureUpgrade<'a, R, T> {
-        FutureUpgrade {
-            rlock: Some(s),
-            _contents: PhantomData,
-            _locktype: PhantomData,
-        }
+        FutureUpgrade { rlock: Some(s) }
     }
 }
