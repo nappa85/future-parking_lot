@@ -5,15 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::marker::PhantomData;
-use std::future::Future;
-use std::task::{Poll, Context, Waker};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::ptr::null_mut;
 use crossbeam_queue::SegQueue;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Waker};
 
-use lock_api::{Mutex as Mutex_, RawMutex, MutexGuard};
+use lock_api::{Mutex as Mutex_, MutexGuard, RawMutex};
 
 use parking_lot::RawMutex as RawMutex_;
 
@@ -21,13 +20,19 @@ use parking_lot::RawMutex as RawMutex_;
 pub type Mutex<T> = Mutex_<FutureRawMutex<RawMutex_>, T>;
 
 /// RawMutex implementor that collects Wakers to wake them up when unlocked
-pub struct FutureRawMutex<R> where R: RawMutex {
+pub struct FutureRawMutex<R>
+where
+    R: RawMutex,
+{
     locking: AtomicBool,
-    wakers: AtomicPtr<SegQueue<Waker>>,
+    wakers: SegQueue<Waker>,
     inner: R,
 }
 
-impl<R> FutureRawMutex<R> where R: RawMutex {
+impl<R> FutureRawMutex<R>
+where
+    R: RawMutex,
+{
     // this is needed to avoid sequences like that:
     // * thread 1 gains lock
     // * thread 2 try lock
@@ -35,7 +40,10 @@ impl<R> FutureRawMutex<R> where R: RawMutex {
     // * thread 2 register waker
     // this creates a situation similar to a deadlock, where the future isn't waked up by nobody
     fn atomic_lock(&self) {
-        while self.locking.compare_and_swap(false, true, Ordering::Relaxed) {}
+        while self
+            .locking
+            .compare_and_swap(false, true, Ordering::Relaxed)
+        {}
     }
 
     fn atomic_unlock(&self) {
@@ -43,63 +51,43 @@ impl<R> FutureRawMutex<R> where R: RawMutex {
     }
 
     fn register_waker(&self, waker: &Waker) {
-        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
-        v.push(waker.clone());
+        self.wakers.push(waker.clone());
         // implicitly unlock
         self.atomic_unlock();
     }
 
-    fn create_wakers_list(&self) {
-        let v = self.wakers.load(Ordering::Relaxed);
-        if v.is_null() {
-            let temp = Box::new(SegQueue::new());
-            self.wakers.compare_and_swap(v, Box::into_raw(temp), Ordering::Relaxed);
-        }
-    }
-
     fn wake_up(&self) {
         self.atomic_lock();
-        let v = unsafe { &mut *self.wakers.load(Ordering::Relaxed) };
-        if let Ok(w) = v.pop() {
+        if let Some(w) = self.wakers.pop() {
             w.wake();
         }
         self.atomic_unlock();
     }
 }
 
-impl<R> Drop for FutureRawMutex<R> where R: RawMutex {
-    fn drop(&mut self) {
-        let v = self.wakers.load(Ordering::Relaxed);
-        if !v.is_null() {
-            unsafe { Box::from_raw(v) };
-        }
-    }
-}
-
-unsafe impl<R> RawMutex for FutureRawMutex<R> where R: RawMutex {
+unsafe impl<R> RawMutex for FutureRawMutex<R>
+where
+    R: RawMutex,
+{
     type GuardMarker = R::GuardMarker;
 
     const INIT: FutureRawMutex<R> = {
         FutureRawMutex {
             locking: AtomicBool::new(false),
-            wakers: AtomicPtr::new(null_mut()),
-            inner: R::INIT
+            wakers: SegQueue::new(),
+            inner: R::INIT,
         }
     };
 
     fn lock(&self) {
-        self.create_wakers_list();
-
         self.inner.lock();
     }
 
     fn try_lock(&self) -> bool {
-        self.create_wakers_list();
-
         self.inner.try_lock()
     }
 
-    fn unlock(&self) {
+    unsafe fn unlock(&self) {
         self.inner.unlock();
 
         self.wake_up();
@@ -139,17 +127,23 @@ where
     type Output = MutexGuard<'a, FutureRawMutex<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        unsafe { self.lock.raw().atomic_lock(); }
+        unsafe {
+            self.lock.raw().atomic_lock();
+        }
         match self.lock.try_lock() {
             Some(read_lock) => {
-                unsafe { self.lock.raw().atomic_unlock(); }
+                unsafe {
+                    self.lock.raw().atomic_unlock();
+                }
                 Poll::Ready(read_lock)
-            },
+            }
             None => {
                 // Register Waker so we can notified when we can be polled again
-                unsafe { self.lock.raw().register_waker(cx.waker()); }
+                unsafe {
+                    self.lock.raw().register_waker(cx.waker());
+                }
                 Poll::Pending
-            },
+            }
         }
     }
 }
@@ -168,15 +162,15 @@ impl<R: RawMutex, T> FutureLockable<R, T> for Mutex_<FutureRawMutex<R>, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::rc::Rc;
+    use std::sync::Arc;
 
-    use tokio::runtime::Runtime as ThreadpoolRuntime;
     use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
+    use tokio::runtime::Runtime as ThreadpoolRuntime;
 
     use super::Mutex;
 
-    use super::{FutureLockable};
+    use super::FutureLockable;
 
     use lazy_static::lazy_static;
 
