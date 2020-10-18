@@ -11,12 +11,15 @@ keywords = ["mutex", "rwlock", "future", "futures", "async"]
 categories = ["concurrency", "asynchronous"]
 
 [dependencies]
-lock_api = "0.3"
-parking_lot = "0.10"
-crossbeam-queue = "0.2"
+lock_api = "0.4"
+parking_lot = "0.11"
+crossbeam-queue = "0.3"
 
 [dev-dependencies]
 lazy_static = "1.4"
 tokio = "=0.2.0-alpha.6"
 log = "0.4"
 env_logger = "0.7"
+
+[patch.crates-io]
+crossbeam-queue = { git = "https://github.com/crossbeam-rs/crossbeam" }
