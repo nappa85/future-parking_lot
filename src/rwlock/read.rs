@@ -5,12 +5,11 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use std::marker::PhantomData;
 use std::future::Future;
-use std::task::{Poll, Context};
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use lock_api::{RwLock, RawRwLock, RwLockReadGuard};
+use lock_api::{RawRwLock, RwLock, RwLockReadGuard};
 
 use super::FutureRawRwLock;
 
@@ -21,8 +20,6 @@ where
     T: 'a,
 {
     lock: &'a RwLock<FutureRawRwLock<R>, T>,
-    _contents: PhantomData<T>,
-    _locktype: PhantomData<R>,
 }
 
 impl<'a, R, T> FutureRead<'a, R, T>
@@ -31,11 +28,7 @@ where
     T: 'a,
 {
     fn new(lock: &'a RwLock<FutureRawRwLock<R>, T>) -> Self {
-        FutureRead {
-            lock,
-            _locktype: PhantomData,
-            _contents: PhantomData,
-        }
+        FutureRead { lock }
     }
 }
 
@@ -47,17 +40,23 @@ where
     type Output = RwLockReadGuard<'a, FutureRawRwLock<R>, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        unsafe { self.lock.raw().atomic_lock(); }
+        unsafe {
+            self.lock.raw().atomic_lock();
+        }
         match self.lock.try_read() {
             Some(read_lock) => {
-                unsafe { self.lock.raw().atomic_unlock(); }
+                unsafe {
+                    self.lock.raw().atomic_unlock();
+                }
                 Poll::Ready(read_lock)
-            },
+            }
             None => {
                 // Register Waker so we can notified when we can be polled again
-                unsafe { self.lock.raw().register_waker(cx.waker()); }
+                unsafe {
+                    self.lock.raw().register_waker(cx.waker());
+                }
                 Poll::Pending
-            },
+            }
         }
     }
 }
