@@ -6,11 +6,10 @@
 // copied, modified, or distributed except according to those terms.
 
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use lock_api::{RawRwLockUpgrade, RwLock, RwLockUpgradableReadGuard};
+use lock_api::{RawRwLockUpgrade, RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use super::FutureRawRwLock;
 
@@ -44,12 +43,9 @@ where
 /// Wrapper to upgradable-read from RwLock in Future-style
 pub struct FutureUpgradableRead<'a, R, T>
 where
-    R: RawRwLockUpgrade + 'a,
-    T: 'a,
+    R: RawRwLockUpgrade,
 {
     lock: &'a RwLock<FutureRawRwLock<R>, T>,
-    _contents: PhantomData<T>,
-    _locktype: PhantomData<R>,
 }
 
 impl<'a, R, T> FutureUpgradableRead<'a, R, T>
@@ -58,11 +54,7 @@ where
     T: 'a,
 {
     fn new(lock: &'a RwLock<FutureRawRwLock<R>, T>) -> Self {
-        FutureUpgradableRead {
-            lock,
-            _contents: PhantomData,
-            _locktype: PhantomData,
-        }
+        FutureUpgradableRead { lock }
     }
 }
 
@@ -104,5 +96,63 @@ pub trait FutureUpgradableReadable<R: RawRwLockUpgrade, T> {
 impl<R: RawRwLockUpgrade, T> FutureUpgradableReadable<R, T> for RwLock<FutureRawRwLock<R>, T> {
     fn future_upgradable_read(&self) -> FutureUpgradableRead<R, T> {
         FutureUpgradableRead::new(self)
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// Wrapper to upgrade a RwLockUpgradableReadGuard in Future-style
+    pub struct FutureUpgrade<'a, R, T>
+    where
+        R: RawRwLockUpgrade,
+        T: ?Sized,
+    {
+        rlock: Option<RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>>,
+    }
+}
+
+impl<'a, R: RawRwLockUpgrade, T: ?Sized> Future for FutureUpgrade<'a, R, T> {
+    type Output = RwLockWriteGuard<'a, FutureRawRwLock<R>, T>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let rlock = self
+            .rlock
+            .take()
+            .expect("can't poll FutureUpgrade after completed");
+        unsafe {
+            RwLockUpgradableReadGuard::rwlock(&rlock)
+                .raw()
+                .atomic_lock();
+        }
+        match RwLockUpgradableReadGuard::try_upgrade(rlock) {
+            Ok(wlock) => {
+                unsafe {
+                    RwLockWriteGuard::rwlock(&wlock).raw().atomic_unlock();
+                }
+                Poll::Ready(wlock)
+            }
+            Err(rlock) => {
+                // Register Waker so we can notified when we can be polled again
+                unsafe {
+                    RwLockUpgradableReadGuard::rwlock(&rlock)
+                        .raw()
+                        .register_waker(cx.waker());
+                }
+                self.rlock = Some(rlock);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Trait to permit FutureUpgrade implementation on wrapped RwLock (not RwLock itself)
+pub trait FutureUpgradable<'a, R: RawRwLockUpgrade, T: ?Sized> {
+    /// Returns the upgraded lock without blocking
+    fn future_upgrade(s: Self) -> FutureUpgrade<'a, R, T>;
+}
+
+impl<'a, R: RawRwLockUpgrade, T: ?Sized> FutureUpgradable<'a, R, T>
+    for RwLockUpgradableReadGuard<'a, FutureRawRwLock<R>, T>
+{
+    fn future_upgrade(s: Self) -> FutureUpgrade<'a, R, T> {
+        FutureUpgrade { rlock: Some(s) }
     }
 }

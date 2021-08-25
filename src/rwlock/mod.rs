@@ -16,11 +16,8 @@ pub mod upgradable_read;
 /// FutureWrite module
 pub mod write;
 
-/// Trait to permit FutureRead implementation on wrapped RwLock (not RwLock itself)
 pub use read::FutureReadable;
-/// Trait to permit FutureUpgradableRead implementation on wrapped RwLock (not RwLock itself)
-pub use upgradable_read::FutureUpgradableReadable;
-/// Trait to permit FutureWrite implementation on wrapped RwLock (not RwLock itself)
+pub use upgradable_read::{FutureUpgradable, FutureUpgradableReadable};
 pub use write::FutureWriteable;
 
 use lock_api::{RawRwLock, RwLock as RwLock_};
@@ -118,13 +115,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use tokio::runtime::current_thread::Runtime as CurrentThreadRuntime;
-    use tokio::runtime::Runtime as ThreadpoolRuntime;
+    use tokio::runtime::{Builder, Runtime};
 
-    use super::{FutureReadable, FutureWriteable, RwLock};
+    use super::{
+        FutureReadable, FutureUpgradable, FutureUpgradableReadable, FutureWriteable, RwLock,
+    };
 
     use lazy_static::lazy_static;
 
@@ -136,12 +135,18 @@ mod tests {
         static ref CONCURRENT_LOCK: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
     }
 
+    fn thread_rt() -> Runtime {
+        Builder::new().basic_scheduler().build().unwrap()
+    }
+    fn threadpool_rt() -> Runtime {
+        Builder::new().threaded_scheduler().build().unwrap()
+    }
+
     #[test]
     fn current_thread_lazy_static() {
         env_logger::try_init().ok();
 
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
-        runtime.block_on(async {
+        thread_rt().block_on(async {
             {
                 let mut v = LOCK1.future_write().await;
                 v.push(String::from("It works!"));
@@ -157,8 +162,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Arc::new(RwLock::new(Vec::new()));
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
-        runtime.block_on(async {
+        thread_rt().block_on(async {
             {
                 let mut v = lock.future_write().await;
                 v.push(String::from("It works!"));
@@ -174,8 +178,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Rc::new(RwLock::new(Vec::new()));
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
-        runtime.block_on(async {
+        thread_rt().block_on(async {
             {
                 let mut v = lock.future_write().await;
                 v.push(String::from("It works!"));
@@ -191,8 +194,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Box::new(RwLock::new(Vec::new()));
-        let mut runtime = CurrentThreadRuntime::new().unwrap();
-        runtime.block_on(async {
+        thread_rt().block_on(async {
             {
                 let mut v = lock.future_write().await;
                 v.push(String::from("It works!"));
@@ -207,8 +209,7 @@ mod tests {
     fn multithread_lazy_static() {
         env_logger::try_init().ok();
 
-        let runtime = ThreadpoolRuntime::new().unwrap();
-        runtime.block_on(async {
+        threadpool_rt().block_on(async {
             {
                 let mut v = LOCK2.future_write().await;
                 v.push(String::from("It works!"));
@@ -224,8 +225,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Arc::new(RwLock::new(Vec::new()));
-        let runtime = ThreadpoolRuntime::new().unwrap();
-        runtime.block_on(async {
+        threadpool_rt().block_on(async {
             {
                 let mut v = lock.future_write().await;
                 v.push(String::from("It works!"));
@@ -241,8 +241,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Rc::new(RwLock::new(Vec::new()));
-        let runtime = ThreadpoolRuntime::new().unwrap();
-        runtime.block_on(async {
+        threadpool_rt().block_on(async {
             {
                 let mut v = lock.future_write().await;
                 v.push(String::from("It works!"));
@@ -258,8 +257,7 @@ mod tests {
         env_logger::try_init().ok();
 
         let lock = Box::new(RwLock::new(Vec::new()));
-        let runtime = ThreadpoolRuntime::new().unwrap();
-        runtime.block_on(async {
+        threadpool_rt().block_on(async {
             {
                 let mut v = lock.future_write().await;
                 v.push(String::from("It works!"));
@@ -274,8 +272,7 @@ mod tests {
     fn multithread_concurrent_lazy_static() {
         env_logger::try_init().ok();
 
-        let runtime = ThreadpoolRuntime::new().unwrap();
-        runtime.block_on(async {
+        threadpool_rt().block_on(async {
             // spawn 10 concurrent futures
             for i in 0..100 {
                 tokio::spawn(async move {
@@ -289,8 +286,37 @@ mod tests {
                 });
             }
         });
-        runtime.shutdown_on_idle();
         let singleton = CONCURRENT_LOCK.read();
         assert_eq!(singleton.len(), 100);
+    }
+
+    #[test]
+    fn multithread_concurrent_upgrade() {
+        env_logger::try_init().ok();
+
+        let lock = Arc::new(RwLock::new(HashMap::new()));
+
+        threadpool_rt().enter(|| {
+            // spawn 10 concurrent futures
+            for i in 0usize..100 {
+                let lock = lock.clone();
+                tokio::spawn(async move {
+                    let guard = lock.future_upgradable_read().await;
+                    if i % 2 == 0 {
+                        let mut guard = FutureUpgradable::future_upgrade(guard).await;
+                        guard.insert(i, i);
+                    } else {
+                        let key = i - 1;
+                        let item = guard.get(&key);
+                        info!("for key {} found {:?}", key, item);
+                        if let Some(&item) = item {
+                            assert_eq!(item, key)
+                        }
+                    }
+                });
+            }
+        });
+        let data = lock.read();
+        assert_eq!(data.len(), 50);
     }
 }
