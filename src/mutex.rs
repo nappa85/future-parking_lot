@@ -7,7 +7,6 @@
 
 use crossbeam_queue::SegQueue;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
@@ -119,7 +118,11 @@ where
 {
     type Output = MutexGuard<'a, FutureRawMutex<R>, T>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(self: 
+      
+      
+      
+      <&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         unsafe {
             self.lock.raw().atomic_lock();
         }
